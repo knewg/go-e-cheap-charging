@@ -36,11 +36,13 @@ from .const import (
     CONF_PHASE_L2_ENTITY,
     CONF_PHASE_L3_ENTITY,
     DEFAULT_CHEAP_THRESHOLD,
+    DEFAULT_PRICE_SPREAD_THRESHOLD,
     DEFAULT_TARGET_SOC,
     DOMAIN,
     NORDPOOL_PRICES_AVAILABLE_HOUR,
     NORDPOOL_PRICES_AVAILABLE_MINUTE,
     PLUGIN_DELAY_S,
+    SCHEDULE_PLANNING_AMP,
     WEEKDAYS,
 )
 
@@ -80,6 +82,7 @@ class EvSmartChargingCoordinator(DataUpdateCoordinator):
         self._smart_enabled: bool = False
         self._charge_now: bool = False
         self._cheap_threshold: float = DEFAULT_CHEAP_THRESHOLD
+        self._price_spread_threshold: float = DEFAULT_PRICE_SPREAD_THRESHOLD
         self._current_price_data: list[dict] = []
 
         # Per-day settings: {day: {"enabled": bool, "departure": time|None, "target_soc": int}}
@@ -147,6 +150,15 @@ class EvSmartChargingCoordinator(DataUpdateCoordinator):
                 self.hass,
                 [self._entity_id("number", "cheap_price_threshold")],
                 self._handle_threshold_change,
+            )
+        )
+
+        # price spread threshold change — affects schedule selection
+        self._state_unsubs.append(
+            async_track_state_change_event(
+                self.hass,
+                [self._entity_id("number", "price_spread_threshold")],
+                self._handle_spread_threshold_change,
             )
         )
 
@@ -261,6 +273,16 @@ class EvSmartChargingCoordinator(DataUpdateCoordinator):
                 pass
         self.hass.async_create_task(self._async_apply_charger_command())
 
+    @callback
+    def _handle_spread_threshold_change(self, event: Any) -> None:
+        new_state = event.data.get("new_state")
+        if new_state and new_state.state not in ("unknown", "unavailable"):
+            try:
+                self._price_spread_threshold = float(new_state.state)
+            except ValueError:
+                pass
+        self.hass.async_create_task(self._async_rebuild_schedule())
+
     # ------------------------------------------------------------------
     # Schedule building
     # ------------------------------------------------------------------
@@ -353,7 +375,8 @@ class EvSmartChargingCoordinator(DataUpdateCoordinator):
             0.0,
             (target_soc - current_soc) / 100 * self._battery_capacity / self._efficiency,
         )
-        max_charge_kw = self._max_amp * 0.23  # single-phase ~230 V
+        # Use conservative planning speed to avoid under-booking slots
+        max_charge_kw = SCHEDULE_PLANNING_AMP * 0.23  # single-phase ~230 V
 
         if kwh_needed < 0.5:
             _LOGGER.info("Already near target SoC (%.0f%% → %.0f%%) — no charging needed", current_soc, target_soc)
@@ -362,13 +385,65 @@ class EvSmartChargingCoordinator(DataUpdateCoordinator):
             await self._async_apply_charger_command()
             return
 
-        slots_needed = math.ceil(kwh_needed / (max_charge_kw * 0.25))
-        actual_slots = min(slots_needed, len(slots))
-
-        sorted_by_price = sorted(slots, key=lambda s: s["price"])
-        cheap_starts = {s["start"] for s in sorted_by_price[:actual_slots]}
+        # --- Group available slots into 1-hour buckets ---
+        from collections import defaultdict
+        hour_buckets: dict = defaultdict(list)
         for s in slots:
-            if s["start"] in cheap_starts:
+            hour_key = s["start"].replace(minute=0, second=0, microsecond=0)
+            hour_buckets[hour_key].append(s)
+
+        hours = sorted(hour_buckets.keys())
+        hour_price = {
+            h: sum(s["price"] for s in hour_buckets[h]) / len(hour_buckets[h])
+            for h in hours
+        }
+
+        all_slot_prices = [hour_price[h] for h in hours]
+        price_spread = max(all_slot_prices) - min(all_slot_prices)
+
+        if price_spread < self._price_spread_threshold:
+            _LOGGER.info(
+                "Price spread %.3f < threshold %.3f — selecting all slots (continuous charging)",
+                price_spread,
+                self._price_spread_threshold,
+            )
+            selected_hours = set(hours)
+        else:
+            hours_needed = math.ceil(kwh_needed / max_charge_kw)
+            actual_hours = min(hours_needed, len(hours))
+
+            # Step 1: pick the cheapest N hours
+            sorted_by_price = sorted(hours, key=lambda h: hour_price[h])
+            selected_hours = set(sorted_by_price[:actual_hours])
+
+            # Step 2: fill gaps between selected hours if gap price ≤ max_selected + threshold
+            max_selected_price = max(hour_price[h] for h in selected_hours)
+            changed = True
+            while changed:
+                changed = False
+                selected_sorted = sorted(selected_hours)
+                for i in range(len(selected_sorted) - 1):
+                    h1 = selected_sorted[i]
+                    h2 = selected_sorted[i + 1]
+                    gap: list = []
+                    cursor = h1 + timedelta(hours=1)
+                    while cursor < h2:
+                        if cursor in hour_price:
+                            gap.append(cursor)
+                        cursor += timedelta(hours=1)
+                    if gap and all(
+                        hour_price[g] <= max_selected_price + self._price_spread_threshold
+                        for g in gap
+                    ):
+                        for g in gap:
+                            selected_hours.add(g)
+                        max_selected_price = max(hour_price[h] for h in selected_hours)
+                        changed = True
+
+        # Mark individual slots whose hour bucket was selected
+        for s in slots:
+            hour_key = s["start"].replace(minute=0, second=0, microsecond=0)
+            if hour_key in selected_hours:
                 s["selected"] = True
 
         self.schedule = slots
@@ -385,10 +460,9 @@ class EvSmartChargingCoordinator(DataUpdateCoordinator):
             est_cost = kwh_needed * avg_price
             next_slot = min(s["start"] for s in selected)
             _LOGGER.info(
-                "Schedule: %.1f kWh, %d/%d slots, avg %.2f SEK/kWh, est %.2f SEK, next: %s, dep: %s (%s)",
+                "Schedule: %.1f kWh, %d hours selected, avg %.2f SEK/kWh, est %.2f SEK, next: %s, dep: %s (%s)",
                 kwh_needed,
-                len(selected),
-                actual_slots,
+                len(selected_hours),
                 avg_price,
                 est_cost,
                 next_slot.strftime("%H:%M"),
@@ -625,3 +699,9 @@ class EvSmartChargingCoordinator(DataUpdateCoordinator):
 
     def get_cheap_threshold(self) -> float:
         return self._cheap_threshold
+
+    def set_price_spread_threshold(self, value: float) -> None:
+        self._price_spread_threshold = value
+
+    def get_price_spread_threshold(self) -> float:
+        return self._price_spread_threshold

@@ -48,3 +48,5 @@ DEFAULT_MIN_AMP = 6
 DEFAULT_MAX_AMP = 16
 DEFAULT_TARGET_SOC = 80
 DEFAULT_CHEAP_THRESHOLD = 0.0
+DEFAULT_PRICE_SPREAD_THRESHOLD = 0.10   # SEK/kWh — if spread < this, charge continuously
+SCHEDULE_PLANNING_AMP = 10              # A — conservative amp used for slot-count calculation
