@@ -32,6 +32,16 @@ for mod in [
 hass_helpers_update = sys.modules["homeassistant.helpers.update_coordinator"]
 hass_helpers_update.DataUpdateCoordinator = object
 
+# Provide minimal ConfigEntry stub
+sys.modules["homeassistant.config_entries"].ConfigEntry = object
+sys.modules["homeassistant.const"] = types.ModuleType("homeassistant.const")
+sys.modules["homeassistant.const"].EVENT_HOMEASSISTANT_STARTED = "homeassistant_started"
+sys.modules["homeassistant.core"].CoreState = type("CoreState", (), {"running": "running", "starting": "starting"})
+sys.modules["homeassistant.core"].callback = lambda f: f
+sys.modules["homeassistant.core"].HomeAssistant = object
+sys.modules["homeassistant.helpers.event"].async_call_later = lambda *a, **k: None
+sys.modules["homeassistant.helpers.event"].async_track_state_change_event = lambda *a, **k: None
+
 # Provide dt_util stubs
 import homeassistant.util.dt as dt_util_stub
 _UTC = timezone.utc
@@ -55,18 +65,20 @@ def _make_slot(start_iso: str, price: float, selected: bool = False) -> dict:
     return {"start": start, "end": end, "price": price, "selected": selected}
 
 
+from custom_components.ev_smart_charging.coordinator import _select_slots, _get_clusters
+
 # -----------------------------------------------------------------------
 # Schedule selection logic (pure, no HA dependencies)
 # -----------------------------------------------------------------------
 
-def select_cheapest_slots(slots: list[dict], slots_needed: int) -> list[dict]:
-    """Copy of coordinator slot-selection logic, extracted for testing."""
-    import copy
-    slots = copy.deepcopy(slots)
-    sorted_by_price = sorted(slots, key=lambda s: s["price"])
-    cheap_starts = {s["start"] for s in sorted_by_price[:slots_needed]}
-    for s in slots:
-        s["selected"] = s["start"] in cheap_starts
+def _make_slots(prices: list, start_iso: str = "2026-01-01T00:00:00+00:00") -> list:
+    """Create contiguous 15-min slots from a list of prices."""
+    start = datetime.fromisoformat(start_iso)
+    slots = []
+    for price in prices:
+        end = start + timedelta(minutes=15)
+        slots.append({"start": start, "end": end, "price": price, "selected": False})
+        start = end
     return slots
 
 
@@ -94,32 +106,112 @@ class TestKwhCalculation:
 
 
 class TestSlotSelection:
-    def _make_future_slots(self, n: int, base_price: float = 1.0) -> list[dict]:
-        now = datetime.now(_UTC)
-        slots = []
-        for i in range(n):
-            start = (now + timedelta(hours=i)).isoformat()
-            slots.append(_make_slot(start, base_price + i * 0.1))
-        return slots
+    def test_selects_cheapest_block(self):
+        # 8 slots; cheapest 4 are in the middle (indices 2-5)
+        # n_slots=4 → one clean 4-slot block, no extension needed
+        prices = [1.5, 1.4, 1.0, 1.1, 1.2, 1.3, 1.6, 1.7]
+        slots = _make_slots(prices)
+        _select_slots(slots, 4, 0.10)
+        selected_indices = [i for i, s in enumerate(slots) if s["selected"]]
+        assert selected_indices == [2, 3, 4, 5]
 
-    def test_selects_cheapest(self):
-        slots = self._make_future_slots(4)
-        result = select_cheapest_slots(slots, 2)
-        selected = [s for s in result if s["selected"]]
-        assert len(selected) == 2
-        # The two cheapest should be the first two (lowest prices)
-        prices = sorted(s["price"] for s in selected)
-        all_prices = sorted(s["price"] for s in slots)
-        assert prices == all_prices[:2]
+    def test_finds_cheapest_window_not_cheapest_individuals(self):
+        # Single ultra-cheap slot surrounded by expensive ones, plus a moderately
+        # cheap contiguous block elsewhere.  The algorithm must pick the cheapest
+        # 1-hour WINDOW, not scatter selection around the single cheap slot.
+        #   index:  0     1     2     3     4     5     6     7     8
+        #   price: 1.00  1.00  0.50  1.00  1.00  0.60  0.70  0.80  0.90
+        # Cheapest 4-slot window by avg: [5-8] = (0.60+0.70+0.80+0.90)/4 = 0.75
+        # (vs window [0-3] avg=0.875 which contains the cheap spike at idx 2)
+        prices = [1.00, 1.00, 0.50, 1.00, 1.00, 0.60, 0.70, 0.80, 0.90]
+        slots = _make_slots(prices)
+        _select_slots(slots, 4, 0.10)
+        selected_indices = [i for i, s in enumerate(slots) if s["selected"]]
+        assert selected_indices == [5, 6, 7, 8]
+
+    def test_fills_cheap_gap_between_blocks(self):
+        # Two 4-slot cheap blocks with a 2-slot cheap gap (0.50) between them.
+        # prices: [0.42]*4 + [0.50,0.50] + [0.43]*4 (10 slots), n_slots=8, n_needed=8
+        # single [0-7] avg=0.4425, multi [{0-3},{6-9}] avg=0.425
+        # single(0.4425) ≤ multi(0.425)+0.10=0.525 → single block [0-7] is preferred.
+        # The cheap gap slots (4-5) are included in the single contiguous block.
+        prices = [0.42] * 4 + [0.50, 0.50] + [0.43] * 4
+        slots = _make_slots(prices)
+        _select_slots(slots, 8, 0.10)
+        selected_indices = [i for i, s in enumerate(slots) if s["selected"]]
+        # Single block [0-7] chosen; cheap gap slots 4-5 are included; slots 8-9 unneeded
+        assert selected_indices == list(range(8))
+
+    def test_does_not_fill_expensive_gap(self):
+        # Expensive gap (0.90) makes multi-block significantly cheaper than single block.
+        # prices: [0.42]*4 + [0.90,0.90] + [0.43]*4 (10 slots), n_slots=8, n_needed=8
+        # single [0-7] avg=0.5425, multi [{0-3},{6-9}] avg=0.425
+        # single(0.5425) > multi(0.425)+0.10=0.525 → multi-block chosen.
+        # Gap-fill: ref_price=0.425, gap 0.90 ≤ 0.525? NO → gap NOT filled.
+        prices = [0.42] * 4 + [0.90, 0.90] + [0.43] * 4
+        slots = _make_slots(prices)
+        _select_slots(slots, 8, 0.10)
+        # Gap (indices 4-5) should NOT be filled
+        assert not slots[4]["selected"]
+        assert not slots[5]["selected"]
+        # Both blocks should still be selected
+        assert all(s["selected"] for s in slots[:4])
+        assert all(s["selected"] for s in slots[6:])
 
     def test_select_all_when_fewer_than_needed(self):
-        slots = self._make_future_slots(2)
-        result = select_cheapest_slots(slots, 5)
-        assert all(s["selected"] for s in result)
+        prices = [1.0, 1.1, 1.2]
+        slots = _make_slots(prices)
+        _select_slots(slots, 10, 0.10)
+        assert all(s["selected"] for s in slots)
 
     def test_no_slots(self):
-        result = select_cheapest_slots([], 3)
-        assert result == []
+        slots = []
+        _select_slots(slots, 3, 0.10)
+        assert slots == []
+
+    def test_non_aligned_cheapest_window(self):
+        # Cheapest 4 slots span a clock-hour boundary: indices 3-6
+        # (old hour-bucket algorithm would have missed this)
+        prices = [1.5, 1.4, 1.3, 1.0, 1.05, 1.1, 1.15, 1.6, 1.7, 1.8, 1.9, 2.0]
+        slots = _make_slots(prices)
+        _select_slots(slots, 4, 0.10)
+        selected_indices = [i for i, s in enumerate(slots) if s["selected"]]
+        assert selected_indices == [3, 4, 5, 6]
+
+    def test_prefers_single_block_over_scattered(self):
+        # 8 slots with varying prices; single block [0-7] is slightly more expensive
+        # than the best multi-block split, but within the spread_threshold.
+        # prices: [0.42, 0.42, 0.55, 0.55, 0.43, 0.43, 0.43, 0.43]
+        # single_avg (8-slot window [0-7]) = (0.42+0.42+0.55+0.55+0.43+0.43+0.43+0.43)/8 = 0.4575...
+        # Actually all 8 slots are needed → n_needed=8 → single block is [0-7] → single_avg=multi_avg
+        # Better: use n_slots=4 with prices designed so single block [4-7] = multi best window too.
+        # Use clear scenario: n_slots=8, single contiguous [0-7] avg=0.4575,
+        # multi two windows [0-3] avg=0.485 and [4-7] avg=0.43 → multi_avg=0.4575 → tie → single ✓
+        prices = [0.42, 0.42, 0.55, 0.55, 0.43, 0.43, 0.43, 0.43]
+        slots = _make_slots(prices)
+        _select_slots(slots, 8, 0.10)
+        selected_indices = [i for i, s in enumerate(slots) if s["selected"]]
+        # single_avg == multi_avg (both 0.4575), so single_avg <= multi_avg + threshold → single block
+        assert selected_indices == list(range(8))
+
+    def test_prefers_multi_block_when_price_spike_exceeds_threshold(self):
+        # Two cheap periods separated by a large price spike.
+        # Prices: cheap [0-3]=0.30, spike [4-7]=1.20, cheap [8-11]=0.32
+        # n_slots=8 → n_needed=8
+        # single best 8-window: [0-7] avg=(4*0.30+4*1.20)/8=0.75
+        # multi two 4-slot windows [0-3]+[8-11] avg=(4*0.30+4*0.32)/8=0.31
+        # single_avg (0.75) > multi_avg (0.31) + threshold (0.10) → multi-block ✓
+        prices = [0.30] * 4 + [1.20] * 4 + [0.32] * 4
+        slots = _make_slots(prices)
+        _select_slots(slots, 8, 0.10)
+        selected_indices = [i for i, s in enumerate(slots) if s["selected"]]
+        # Should pick both cheap blocks, not the spike
+        assert 4 not in selected_indices
+        assert 5 not in selected_indices
+        assert 6 not in selected_indices
+        assert 7 not in selected_indices
+        assert all(i in selected_indices for i in range(4))
+        assert all(i in selected_indices for i in range(8, 12))
 
 
 class TestAmpAdjust:

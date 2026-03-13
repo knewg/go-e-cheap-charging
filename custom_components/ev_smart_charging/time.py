@@ -50,6 +50,7 @@ class EvChargingDepartureTime(RestoreEntity, TimeEntity):
                 self._coordinator.set_day_departure(self._day, t)
             except (ValueError, IndexError):
                 pass
+        self._coordinator.schedule_pending_rebuild()
 
     @property
     def native_value(self) -> time | None:

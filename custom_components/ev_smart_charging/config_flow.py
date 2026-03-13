@@ -16,6 +16,7 @@ from .const import (
     CONF_BREAKER_LIMIT,
     CONF_CAR_DEVICE_ID,
     CONF_CAR_SOC_ENTITY,
+    CONF_CHARGER_N_PHASES,
     CONF_CHARGER_PHASE,
     CONF_CHARGER_SERIAL,
     CONF_EFFICIENCY,
@@ -26,6 +27,7 @@ from .const import (
     CONF_PHASE_L3_ENTITY,
     DEFAULT_BATTERY_CAPACITY,
     DEFAULT_BREAKER_LIMIT,
+    DEFAULT_CHARGER_N_PHASES,
     DEFAULT_CHARGER_PHASE,
     DEFAULT_EFFICIENCY,
     DEFAULT_MAX_AMP,
@@ -80,6 +82,7 @@ class EvSmartChargingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     def __init__(self) -> None:
         self._data: dict[str, Any] = {}
+        self._reconfigure: bool = False
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -95,11 +98,12 @@ class EvSmartChargingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._data.update(user_input)
             return await self.async_step_electrical()
 
+        cur = self._data
         schema = vol.Schema(
             {
-                vol.Required(CONF_CHARGER_SERIAL): str,
-                vol.Required(CONF_CAR_SOC_ENTITY): vol.In(kia_sensors) if kia_sensors else str,
-                vol.Required(CONF_CAR_DEVICE_ID): vol.In(kia_devices) if kia_devices else str,
+                vol.Required(CONF_CHARGER_SERIAL, default=cur.get(CONF_CHARGER_SERIAL, "")): str,
+                vol.Required(CONF_CAR_SOC_ENTITY, default=cur.get(CONF_CAR_SOC_ENTITY)): vol.In(kia_sensors) if kia_sensors else str,
+                vol.Required(CONF_CAR_DEVICE_ID, default=cur.get(CONF_CAR_DEVICE_ID)): vol.In(kia_devices) if kia_devices else str,
             }
         )
 
@@ -122,11 +126,12 @@ class EvSmartChargingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._data.update(user_input)
             return await self.async_step_charger_params()
 
+        cur = self._data
         schema = vol.Schema(
             {
-                vol.Required(CONF_PHASE_L1_ENTITY): vol.In(amp_sensors) if amp_sensors else str,
-                vol.Required(CONF_PHASE_L2_ENTITY): vol.In(amp_sensors) if amp_sensors else str,
-                vol.Required(CONF_PHASE_L3_ENTITY): vol.In(amp_sensors) if amp_sensors else str,
+                vol.Required(CONF_PHASE_L1_ENTITY, default=cur.get(CONF_PHASE_L1_ENTITY)): vol.In(amp_sensors) if amp_sensors else str,
+                vol.Required(CONF_PHASE_L2_ENTITY, default=cur.get(CONF_PHASE_L2_ENTITY)): vol.In(amp_sensors) if amp_sensors else str,
+                vol.Required(CONF_PHASE_L3_ENTITY, default=cur.get(CONF_PHASE_L3_ENTITY)): vol.In(amp_sensors) if amp_sensors else str,
             }
         )
 
@@ -138,25 +143,39 @@ class EvSmartChargingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Step 3: battery and charger parameters."""
         if user_input is not None:
             self._data.update(user_input)
+            if self._reconfigure:
+                return self.async_update_reload_and_abort(
+                    self._get_reconfigure_entry(), data=self._data
+                )
             return self.async_create_entry(title="EV Smart Charging", data=self._data)
 
+        cur = self._data
         schema = vol.Schema(
             {
-                vol.Required(CONF_BATTERY_CAPACITY, default=DEFAULT_BATTERY_CAPACITY): vol.Coerce(float),
-                vol.Required(CONF_EFFICIENCY, default=DEFAULT_EFFICIENCY): vol.All(
+                vol.Required(CONF_BATTERY_CAPACITY, default=cur.get(CONF_BATTERY_CAPACITY, DEFAULT_BATTERY_CAPACITY)): vol.Coerce(float),
+                vol.Required(CONF_EFFICIENCY, default=cur.get(CONF_EFFICIENCY, DEFAULT_EFFICIENCY)): vol.All(
                     vol.Coerce(float), vol.Range(min=0.5, max=1.0)
                 ),
-                vol.Required(CONF_BREAKER_LIMIT, default=DEFAULT_BREAKER_LIMIT): vol.All(
+                vol.Required(CONF_BREAKER_LIMIT, default=cur.get(CONF_BREAKER_LIMIT, DEFAULT_BREAKER_LIMIT)): vol.All(
                     vol.Coerce(int), vol.Range(min=10, max=63)
                 ),
-                vol.Required(CONF_CHARGER_PHASE, default=DEFAULT_CHARGER_PHASE): vol.In([1, 2, 3]),
-                vol.Required(CONF_MIN_AMP, default=DEFAULT_MIN_AMP): vol.All(
+                vol.Required(CONF_CHARGER_N_PHASES, default=cur.get(CONF_CHARGER_N_PHASES, DEFAULT_CHARGER_N_PHASES)): vol.In([1, 3]),
+                vol.Required(CONF_CHARGER_PHASE, default=cur.get(CONF_CHARGER_PHASE, DEFAULT_CHARGER_PHASE)): vol.In([1, 2, 3]),
+                vol.Required(CONF_MIN_AMP, default=cur.get(CONF_MIN_AMP, DEFAULT_MIN_AMP)): vol.All(
                     vol.Coerce(int), vol.Range(min=6, max=32)
                 ),
-                vol.Required(CONF_MAX_AMP, default=DEFAULT_MAX_AMP): vol.All(
+                vol.Required(CONF_MAX_AMP, default=cur.get(CONF_MAX_AMP, DEFAULT_MAX_AMP)): vol.All(
                     vol.Coerce(int), vol.Range(min=6, max=32)
                 ),
             }
         )
 
         return self.async_show_form(step_id="charger_params", data_schema=schema)
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Reconfigure: start at step 1 with current values pre-filled."""
+        self._reconfigure = True
+        self._data = dict(self._get_reconfigure_entry().data)
+        return await self.async_step_user(user_input)

@@ -44,6 +44,20 @@ class EvChargingScheduleSensor(SensorEntity):
     def native_value(self) -> str:
         return self._coordinator.get_schedule_summary()
 
+    @property
+    def extra_state_attributes(self) -> dict:
+        selected = [s for s in self._coordinator.schedule if s["selected"]]
+        return {
+            "slots": [
+                {
+                    "start": s["start"].isoformat(),
+                    "end": s["end"].isoformat(),
+                    "price": round(s["price"], 4),
+                }
+                for s in sorted(selected, key=lambda s: s["start"])
+            ]
+        }
+
 
 class EvChargingNextSlotSensor(SensorEntity):
     """Timestamp of the next selected charging slot."""

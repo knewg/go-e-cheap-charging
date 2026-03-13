@@ -49,7 +49,7 @@ class KiaUvoDriver:
             await self.hass.services.async_call(
                 "kia_uvo",
                 "set_charge_limits",
-                {"device_id": self.device_id, "ac_limit": limit_pct},
+                {"device_id": self.device_id, "ac_limit": limit_pct, "dc_limit": limit_pct},
                 blocking=False,
             )
         except Exception:  # noqa: BLE001

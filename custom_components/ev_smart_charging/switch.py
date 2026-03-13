@@ -1,6 +1,8 @@
 """Switch entities for EV Smart Charging."""
 from __future__ import annotations
 
+import logging
+
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -9,6 +11,8 @@ from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import DOMAIN, WEEKDAYS
 from .coordinator import EvSmartChargingCoordinator
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -39,6 +43,7 @@ class _BaseSwitch(RestoreEntity, SwitchEntity):
         last = await self.async_get_last_state()
         if last:
             await self._async_restore(last.state == "on")
+        self._coordinator.schedule_pending_rebuild()
 
     async def _async_restore(self, value: bool) -> None:
         pass
@@ -85,6 +90,12 @@ class EvChargingChargeNowSwitch(_BaseSwitch):
     @property
     def is_on(self) -> bool:
         return self._coordinator.get_charge_now()
+
+    async def async_added_to_hass(self) -> None:
+        last = await self.async_get_last_state()
+        if last:
+            await self._async_restore(last.state == "on")
+        # charge_now resets to off on restart intentionally — don't trigger a rebuild
 
     async def async_turn_on(self, **kwargs) -> None:
         self._coordinator.set_charge_now(True)

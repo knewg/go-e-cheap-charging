@@ -7,7 +7,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import DEFAULT_CHEAP_THRESHOLD, DEFAULT_PRICE_SPREAD_THRESHOLD, DEFAULT_TARGET_SOC, DOMAIN, WEEKDAYS
+from .const import DEFAULT_CHEAP_THRESHOLD, DEFAULT_MANUAL_KWH, DEFAULT_PRICE_SPREAD_THRESHOLD, DEFAULT_TARGET_SOC, DOMAIN, WEEKDAYS
 from .coordinator import EvSmartChargingCoordinator
 
 
@@ -19,6 +19,7 @@ async def async_setup_entry(
     coordinator: EvSmartChargingCoordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities(
         [EvChargingTargetSoc(coordinator, entry, day) for day in WEEKDAYS]
+        + [EvChargingManualKwh(coordinator, entry, day) for day in WEEKDAYS]
         + [EvChargingCheapThreshold(coordinator, entry)]
         + [EvChargingPriceSpreadThreshold(coordinator, entry)]
     )
@@ -53,6 +54,7 @@ class EvChargingTargetSoc(RestoreEntity, NumberEntity):
                 self._coordinator.set_day_target_soc(self._day, float(last.state))
             except ValueError:
                 pass
+        self._coordinator.schedule_pending_rebuild()
 
     @property
     def native_value(self) -> float:
@@ -136,5 +138,46 @@ class EvChargingPriceSpreadThreshold(RestoreEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         self._coordinator.set_price_spread_threshold(value)
+        self.async_write_ha_state()
+        await self._coordinator._async_rebuild_schedule()
+
+
+class EvChargingManualKwh(RestoreEntity, NumberEntity):
+    """Per-weekday manual kWh override (0 = use SoC-based calculation)."""
+
+    _attr_should_poll = False
+    _attr_native_min_value = 0.0
+    _attr_native_max_value = 100.0
+    _attr_native_step = 0.5
+    _attr_native_unit_of_measurement = "kWh"
+    _attr_mode = NumberMode.SLIDER
+
+    def __init__(
+        self,
+        coordinator: EvSmartChargingCoordinator,
+        entry: ConfigEntry,
+        day: str,
+    ) -> None:
+        self._coordinator = coordinator
+        self._entry = entry
+        self._day = day
+        self._attr_unique_id = f"{entry.entry_id}_{day}_manual_kwh"
+        self._attr_name = f"EV Charging {day.capitalize()} Manual kWh"
+
+    async def async_added_to_hass(self) -> None:
+        last = await self.async_get_last_state()
+        if last and last.state not in ("unknown", "unavailable", ""):
+            try:
+                self._coordinator.set_day_manual_kwh(self._day, float(last.state))
+            except ValueError:
+                pass
+        self._coordinator.schedule_pending_rebuild()
+
+    @property
+    def native_value(self) -> float:
+        return self._coordinator.get_day_manual_kwh(self._day)
+
+    async def async_set_native_value(self, value: float) -> None:
+        self._coordinator.set_day_manual_kwh(self._day, value)
         self.async_write_ha_state()
         await self._coordinator._async_rebuild_schedule()
