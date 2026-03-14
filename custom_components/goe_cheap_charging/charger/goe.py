@@ -32,19 +32,23 @@ class GoeCharger:
         remainder = topic[len(prefix):]
         # Only handle top-level keys, not /set or /result
         if "/" in remainder:
+            _LOGGER.debug("go-e ignoring subtopic: %s", topic)
             return None
         return remainder
 
     async def async_set_frc(self, value: int) -> None:
         """Set force-charge mode. 1=force stop, 2=force charge."""
+        _LOGGER.debug("go-e frc → %s (%s)", value, "charge" if value == 2 else "stop")
         await self._async_publish("frc", value)
 
     async def async_set_amp(self, amps: int) -> None:
         """Set charging current in amps."""
+        _LOGGER.debug("go-e amp → %dA", amps)
         await self._async_publish("amp", amps)
 
     async def async_start_transaction(self, force_charge: bool = True) -> None:
         """Start a new charging transaction then set frc."""
+        _LOGGER.info("go-e start transaction (trx=1, frc=%s)", 2 if force_charge else 1)
         await self._async_publish("trx", 1)
         await self._async_publish("frc", 2 if force_charge else 1)
 

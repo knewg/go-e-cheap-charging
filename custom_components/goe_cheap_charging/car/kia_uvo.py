@@ -41,13 +41,16 @@ class KiaUvoDriver:
             _LOGGER.warning("Car SoC entity %s unavailable", entity_id)
             return 0.0
         try:
-            return float(state.state)
+            value = float(state.state)
+            _LOGGER.debug("Car SoC: %.1f%% (entity: %s)", value, entity_id)
+            return value
         except ValueError:
             _LOGGER.warning("Cannot parse car SoC state: %r", state.state)
             return 0.0
 
     async def async_force_update(self) -> None:
         """Request a fresh data pull from the Kia cloud."""
+        _LOGGER.debug("Requesting Kia UVO force update for device %s", self.device_id)
         await self.hass.services.async_call(
             "kia_uvo",
             "force_update",
@@ -72,7 +75,9 @@ class KiaUvoDriver:
         if state is None or state.state in ("unknown", "unavailable", ""):
             return None
         try:
-            return int(float(state.state))
+            value = int(float(state.state))
+            _LOGGER.debug("Car AC charge limit: %d%% (entity: %s)", value, entity.entity_id)
+            return value
         except ValueError:
             return None
 
@@ -82,6 +87,7 @@ class KiaUvoDriver:
         This is best-effort — if the service is unavailable or the car doesn't
         support it the schedule still controls charging via the charger.
         """
+        _LOGGER.info("Setting car charge limit → %d%% (device %s)", limit_pct, self.device_id)
         try:
             await self.hass.services.async_call(
                 "kia_uvo",

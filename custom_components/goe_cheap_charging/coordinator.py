@@ -357,6 +357,7 @@ class ChargingCoordinator(DataUpdateCoordinator):
 
     async def _async_on_slot_boundary(self) -> None:
         """Called when a scheduled slot starts or ends."""
+        _LOGGER.debug("Slot boundary fired — re-evaluating charger command")
         await self._async_apply_charger_command()
         self._schedule_next_slot_timer()
 
@@ -428,6 +429,7 @@ class ChargingCoordinator(DataUpdateCoordinator):
 
     @callback
     def _handle_mqtt_message(self, msg: Any) -> None:
+        _LOGGER.debug("MQTT ← %s : %s", msg.topic, msg.payload)
         key = self.charger.extract_key(msg.topic)
         if key is None:
             return
@@ -438,6 +440,7 @@ class ChargingCoordinator(DataUpdateCoordinator):
             return
 
         if key == "trx":
+            _LOGGER.debug("MQTT trx update: %s → transaction_active=%s", value, bool(value))
             self._transaction_active = bool(value)
         elif key == "car":
             self._handle_car_state(int(value))
@@ -446,7 +449,10 @@ class ChargingCoordinator(DataUpdateCoordinator):
         prev = self.car_state
         self.car_state = new_car_state
 
-        _LOGGER.debug("go-e car state: %s → %s (transaction_active=%s)", prev, new_car_state, self._transaction_active)
+        _LOGGER.info(
+            "Car state: %s → %s  (transaction_active=%s)",
+            prev, new_car_state, self._transaction_active,
+        )
 
         if prev == CAR_IDLE and new_car_state in (CAR_CONNECTED, CAR_CHARGING):
             if self._transaction_active:
@@ -463,6 +469,7 @@ class ChargingCoordinator(DataUpdateCoordinator):
                 self._transaction_active = True
 
         elif new_car_state == CAR_COMPLETE and prev != CAR_COMPLETE:
+            _LOGGER.debug("CAR_COMPLETE: clearing _last_sent_car_limit and transaction")
             self._transaction_active = False
             self._last_sent_car_limit = None   # resend limit if car resumes after target SoC increase
             self._stop_amp_adjust()
@@ -480,11 +487,16 @@ class ChargingCoordinator(DataUpdateCoordinator):
 
         # Force update and hourly loop management on charging state transitions
         if new_car_state == CAR_CHARGING and prev != CAR_CHARGING:
+            _LOGGER.info(
+                "Charging started — force update queued, long_block=%s",
+                self._is_long_charging_block(),
+            )
             if not self._active_car_is_guest and self.car is not None:
                 self.hass.async_create_task(self.car.async_force_update())
             if self._is_long_charging_block():
                 self._start_hourly_force_update()
         elif prev == CAR_CHARGING and new_car_state != CAR_CHARGING:
+            _LOGGER.info("Charging stopped — force update queued, hourly loop cancelled")
             self._stop_hourly_force_update()
             if not self._active_car_is_guest and self.car is not None:
                 self.hass.async_create_task(self.car.async_force_update())
@@ -519,10 +531,12 @@ class ChargingCoordinator(DataUpdateCoordinator):
 
     def _stop_hourly_force_update(self) -> None:
         if self._hourly_update_task and not self._hourly_update_task.done():
+            _LOGGER.debug("Stopping hourly force-update loop")
             self._hourly_update_task.cancel()
         self._hourly_update_task = None
 
     def _start_hourly_force_update(self) -> None:
+        _LOGGER.debug("Starting hourly force-update loop (long charging block detected)")
         self._stop_hourly_force_update()
         self._hourly_update_task = self.hass.async_create_task(
             self._async_hourly_force_update_loop()
@@ -679,6 +693,13 @@ class ChargingCoordinator(DataUpdateCoordinator):
             "Rebuild schedule: smart_enabled=%s, days=%s",
             self._smart_enabled,
             {d: self._day_settings[d] for d in WEEKDAYS if self._day_settings[d]["target_soc"] > 0 or self._day_settings[d]["manual_kwh"] > 0},
+        )
+        _LOGGER.debug(
+            "Schedule rebuild: car_state=%s soc=%s target=%s departure=%s",
+            self.car_state,
+            self._last_current_soc,
+            self._last_target_soc,
+            self._next_departure_dt,
         )
         if not self._smart_enabled:
             self._schedule_status_reason = "Smart charging disabled"
@@ -1032,6 +1053,7 @@ class ChargingCoordinator(DataUpdateCoordinator):
 
         # No cable connected — nothing to do
         if self.car_state == CAR_IDLE:
+            _LOGGER.debug("_async_apply_charger_command: car idle (no cable) — skipping")
             return
 
         should_charge = self._charge_now or in_slot or cheap_slot
@@ -1083,17 +1105,26 @@ class ChargingCoordinator(DataUpdateCoordinator):
                 desired_limit = int(self._opportunistic_soc_limit)
 
             if self.car and not self._active_car_is_guest and desired_limit != self._last_sent_car_limit:
+                _LOGGER.info(
+                    "Car charge limit: %s → %d%% (mode: %s)",
+                    self._last_sent_car_limit,
+                    desired_limit,
+                    "charge_now" if self._charge_now else ("in_slot" if in_slot else "cheap"),
+                )
                 await self.car.async_set_charge_limit(desired_limit)
                 self._last_sent_car_limit = desired_limit
 
             if not self._transaction_active:
                 # No session running yet — start one
+                _LOGGER.info("Starting new transaction (trx=1 + frc=2, car_state=%s)", self.car_state)
                 await self.charger.async_start_transaction(force_charge=True)
                 self._transaction_active = True
             else:
+                _LOGGER.debug("Resuming charge: frc=2 (car_state=%s)", self.car_state)
                 await self.charger.async_set_frc(2)
         else:
             if self._transaction_active:
+                _LOGGER.debug("Pausing charge: frc=1 (car_state=%s)", self.car_state)
                 await self.charger.async_set_frc(1)
 
         self._update_schedule_sensors()
@@ -1135,6 +1166,15 @@ class ChargingCoordinator(DataUpdateCoordinator):
 
         headroom = min(self._breaker_limit - p for p in phases)
         new_amp = int(max(self._min_amp, min(self._max_amp, round(headroom))))
+
+        _LOGGER.debug(
+            "Amp adjust eval: phases=%s headroom=%.1f → new=%dA last=%dA (delta=%d)",
+            [round(p, 1) for p in phases],
+            headroom,
+            new_amp,
+            self._last_sent_amp,
+            abs(new_amp - self._last_sent_amp),
+        )
 
         if abs(new_amp - self._last_sent_amp) < 1:
             return
