@@ -1,4 +1,4 @@
-"""Sensor entities (status display) for EV Smart Charging."""
+"""Sensor entities (status display) for GO-e Cheap Charging."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -9,7 +9,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
-from .coordinator import EvSmartChargingCoordinator
+from .coordinator import ChargingCoordinator
+from .entity import ev_device_info
 
 
 async def async_setup_entry(
@@ -17,10 +18,10 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    coordinator: EvSmartChargingCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: ChargingCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    schedule_sensor = EvChargingScheduleSensor(coordinator, entry)
-    next_slot_sensor = EvChargingNextSlotSensor(coordinator, entry)
+    schedule_sensor = ScheduleSensor(coordinator, entry)
+    next_slot_sensor = NextSlotSensor(coordinator, entry)
 
     # Give coordinator references so it can push state updates
     coordinator._schedule_sensor = schedule_sensor
@@ -29,16 +30,20 @@ async def async_setup_entry(
     async_add_entities([schedule_sensor, next_slot_sensor])
 
 
-class EvChargingScheduleSensor(SensorEntity):
+
+
+
+class ScheduleSensor(SensorEntity):
     """Human-readable charging schedule summary."""
 
     _attr_should_poll = False
     _attr_icon = "mdi:calendar-clock"
 
-    def __init__(self, coordinator: EvSmartChargingCoordinator, entry: ConfigEntry) -> None:
+    def __init__(self, coordinator: ChargingCoordinator, entry: ConfigEntry) -> None:
         self._coordinator = coordinator
         self._attr_unique_id = f"{entry.entry_id}_schedule"
-        self._attr_name = "EV Charging Schedule"
+        self._attr_name = "Cheap Charging Schedule"
+        self._attr_device_info = ev_device_info(entry)
 
     @property
     def native_value(self) -> str:
@@ -59,17 +64,18 @@ class EvChargingScheduleSensor(SensorEntity):
         }
 
 
-class EvChargingNextSlotSensor(SensorEntity):
+class NextSlotSensor(SensorEntity):
     """Timestamp of the next selected charging slot."""
 
     _attr_should_poll = False
     _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_icon = "mdi:clock-start"
 
-    def __init__(self, coordinator: EvSmartChargingCoordinator, entry: ConfigEntry) -> None:
+    def __init__(self, coordinator: ChargingCoordinator, entry: ConfigEntry) -> None:
         self._coordinator = coordinator
         self._attr_unique_id = f"{entry.entry_id}_next_slot"
-        self._attr_name = "EV Charging Next Slot"
+        self._attr_name = "Cheap Charging Next Slot"
+        self._attr_device_info = ev_device_info(entry)
 
     @property
     def native_value(self) -> datetime | None:

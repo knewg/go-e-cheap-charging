@@ -8,8 +8,9 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import ACTIVE_CAR_GUEST, CONF_CAR_SOC_ENTITY, DOMAIN
-from .coordinator import EvSmartChargingCoordinator
+from .const import ACTIVE_CAR_GUEST, DOMAIN
+from .coordinator import ChargingCoordinator
+from .entity import ev_device_info
 
 
 async def async_setup_entry(
@@ -17,21 +18,22 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    coordinator: EvSmartChargingCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([EvCarSelectEntity(coordinator, entry)])
+    coordinator: ChargingCoordinator = hass.data[DOMAIN][entry.entry_id]
+    async_add_entities([ActiveCarSelect(coordinator, entry)])
 
 
-class EvCarSelectEntity(RestoreEntity, SelectEntity):
+class ActiveCarSelect(RestoreEntity, SelectEntity):
     """Dropdown to select the active car or Guest mode."""
 
     _attr_should_poll = False
     _attr_icon = "mdi:car-electric"
 
-    def __init__(self, coordinator: EvSmartChargingCoordinator, entry: ConfigEntry) -> None:
+    def __init__(self, coordinator: ChargingCoordinator, entry: ConfigEntry) -> None:
         self._coordinator = coordinator
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_active_car"
-        self._attr_name = "EV Charging Active Car"
+        self._attr_name = "Cheap Charging Active Car"
+        self._attr_device_info = ev_device_info(entry)
         self._option_map: dict[str, tuple[str, str]] = {}  # label → (soc_entity_id, device_id)
         self._current_option: str = "Guest"
         self._attr_options: list[str] = ["Guest"]
@@ -40,18 +42,15 @@ class EvCarSelectEntity(RestoreEntity, SelectEntity):
         """Discover all Kia UVO cars and return label→(soc_entity_id, device_id) map."""
         ent_reg = er.async_get(self.hass)
         dev_reg = dr.async_get(self.hass)
-        configured_soc = self._entry.data[CONF_CAR_SOC_ENTITY]
-        # Collect all candidate % sensors per device; prefer the configured entity.
+        # Collect one % sensor per device (first match wins).
         device_to_soc: dict[str, str] = {}
         for e in ent_reg.entities.values():
             if e.domain != "sensor" or not e.platform or "kia" not in e.platform.lower():
                 continue
             state = self.hass.states.get(e.entity_id)
             if state and state.attributes.get("unit_of_measurement") == "%":
-                if e.device_id:
-                    # Always prefer the explicitly configured entity over any other
-                    if e.device_id not in device_to_soc or e.entity_id == configured_soc:
-                        device_to_soc[e.device_id] = e.entity_id
+                if e.device_id and e.device_id not in device_to_soc:
+                    device_to_soc[e.device_id] = e.entity_id
 
         options: dict[str, tuple[str, str]] = {}
         for device_id, soc_entity_id in device_to_soc.items():
@@ -69,13 +68,9 @@ class EvCarSelectEntity(RestoreEntity, SelectEntity):
         if last and last.state in self._option_map:
             self._current_option = last.state
         else:
-            primary_soc = self._entry.data[CONF_CAR_SOC_ENTITY]
-            for label, (eid, _did) in self._option_map.items():
-                if eid == primary_soc:
-                    self._current_option = label
-                    break
-            else:
-                self._current_option = "Guest"
+            # Default to the first discovered car, or Guest if none found.
+            non_guest = [label for label in self._option_map if label != "Guest"]
+            self._current_option = non_guest[0] if non_guest else "Guest"
 
         soc_entity_id, device_id = self._option_map[self._current_option]
         self._coordinator.async_set_active_car(soc_entity_id, device_id)

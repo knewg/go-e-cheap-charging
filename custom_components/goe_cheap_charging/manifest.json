@@ -1,6 +1,6 @@
 {
-  "domain": "ev_smart_charging",
-  "name": "EV Smart Charging",
+  "domain": "goe_cheap_charging",
+  "name": "GO-e Cheap Charging",
   "version": "1.0.0",
   "config_flow": true,
   "documentation": "",

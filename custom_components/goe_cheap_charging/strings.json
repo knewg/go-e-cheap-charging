@@ -1,0 +1,44 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Charger & Battery Parameters",
+        "data": {
+          "charger_serial": "Go-e charger serial number",
+          "battery_capacity_kwh": "Battery capacity (kWh)",
+          "charge_efficiency": "Charge efficiency",
+          "breaker_limit_a": "Household breaker limit (A)",
+          "charger_n_phases": "Number of phases the charger uses (1 or 3)",
+          "min_amp": "Minimum charging current (A)",
+          "max_amp": "Maximum charging current (A)"
+        }
+      },
+      "charger_phase": {
+        "title": "Single-Phase Setup",
+        "description": "Which household phase is the charger connected to? This is used to correctly measure available headroom.",
+        "data": {
+          "charger_phase": "Charger phase (1, 2, or 3)"
+        }
+      },
+      "electrical": {
+        "title": "Phase Current Sensors",
+        "description": "Select the energy monitor sensors for each phase (unit: A).",
+        "data": {
+          "phase_l1_entity": "Phase L1 current sensor",
+          "phase_l2_entity": "Phase L2 current sensor",
+          "phase_l3_entity": "Phase L3 current sensor"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect"
+    }
+  },
+  "entity": {
+    "number": {
+      "cheap_price_threshold": {
+        "name": "Cheap Price Threshold"
+      }
+    }
+  }
+}

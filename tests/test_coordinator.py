@@ -1,4 +1,4 @@
-"""Unit tests for the EV Smart Charging coordinator logic."""
+"""Unit tests for the GO-e Cheap Charging coordinator logic."""
 from __future__ import annotations
 
 import math
@@ -19,6 +19,7 @@ for mod in [
     "homeassistant.components",
     "homeassistant.components.mqtt",
     "homeassistant.helpers",
+    "homeassistant.helpers.entity_registry",
     "homeassistant.helpers.update_coordinator",
     "homeassistant.helpers.event",
     "homeassistant.helpers.restore_state",
@@ -41,6 +42,8 @@ sys.modules["homeassistant.core"].callback = lambda f: f
 sys.modules["homeassistant.core"].HomeAssistant = object
 sys.modules["homeassistant.helpers.event"].async_call_later = lambda *a, **k: None
 sys.modules["homeassistant.helpers.event"].async_track_state_change_event = lambda *a, **k: None
+sys.modules["homeassistant.helpers"].entity_registry = sys.modules["homeassistant.helpers.entity_registry"]
+sys.modules["homeassistant.helpers.entity_registry"].async_get = lambda *a, **k: MagicMock()
 
 # Provide dt_util stubs
 import homeassistant.util.dt as dt_util_stub
@@ -65,7 +68,7 @@ def _make_slot(start_iso: str, price: float, selected: bool = False) -> dict:
     return {"start": start, "end": end, "price": price, "selected": selected}
 
 
-from custom_components.ev_smart_charging.coordinator import _select_slots, _get_clusters
+from custom_components.goe_cheap_charging.coordinator import _select_slots, _get_clusters
 
 # -----------------------------------------------------------------------
 # Schedule selection logic (pure, no HA dependencies)

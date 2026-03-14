@@ -1,4 +1,4 @@
-"""Time entities (departure pickers) for EV Smart Charging."""
+"""Time entities (departure pickers) for GO-e Cheap Charging."""
 from __future__ import annotations
 
 from datetime import time
@@ -10,7 +10,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import DOMAIN, WEEKDAYS
-from .coordinator import EvSmartChargingCoordinator
+from .coordinator import ChargingCoordinator
+from .entity import ev_device_info
 
 
 async def async_setup_entry(
@@ -18,20 +19,20 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    coordinator: EvSmartChargingCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: ChargingCoordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities(
-        [EvChargingDepartureTime(coordinator, entry, day) for day in WEEKDAYS]
+        [DepartureTime(coordinator, entry, day) for day in WEEKDAYS]
     )
 
 
-class EvChargingDepartureTime(RestoreEntity, TimeEntity):
+class DepartureTime(RestoreEntity, TimeEntity):
     """Departure time picker for one weekday."""
 
     _attr_should_poll = False
 
     def __init__(
         self,
-        coordinator: EvSmartChargingCoordinator,
+        coordinator: ChargingCoordinator,
         entry: ConfigEntry,
         day: str,
     ) -> None:
@@ -39,7 +40,8 @@ class EvChargingDepartureTime(RestoreEntity, TimeEntity):
         self._entry = entry
         self._day = day
         self._attr_unique_id = f"{entry.entry_id}_{day}_departure"
-        self._attr_name = f"EV Charging {day.capitalize()} Departure"
+        self._attr_name = f"Cheap Charging {day.capitalize()} Departure"
+        self._attr_device_info = ev_device_info(entry)
 
     async def async_added_to_hass(self) -> None:
         last = await self.async_get_last_state()

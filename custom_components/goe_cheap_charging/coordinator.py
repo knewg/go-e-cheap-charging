@@ -27,8 +27,6 @@ from .const import (
     CAR_IDLE,
     CONF_BATTERY_CAPACITY,
     CONF_BREAKER_LIMIT,
-    CONF_CAR_DEVICE_ID,
-    CONF_CAR_SOC_ENTITY,
     CONF_CHARGER_N_PHASES,
     CONF_CHARGER_PHASE,
     CONF_CHARGER_SERIAL,
@@ -150,7 +148,7 @@ def _select_slots(slots: list, n_slots: int, spread_threshold: float) -> None:
         s["selected"] = i in selected
 
 
-class EvSmartChargingCoordinator(DataUpdateCoordinator):
+class ChargingCoordinator(DataUpdateCoordinator):
     """Manages smart charging schedule and charger control."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -174,7 +172,7 @@ class EvSmartChargingCoordinator(DataUpdateCoordinator):
         ]
 
         self.charger = GoeCharger(hass, self._serial)
-        self.car = KiaUvoDriver(hass, cfg[CONF_CAR_SOC_ENTITY], cfg[CONF_CAR_DEVICE_ID])
+        self.car: KiaUvoDriver | None = None
         self._active_car_is_guest: bool = False
         self._soc_unsub: Any = None
 
@@ -374,17 +372,19 @@ class EvSmartChargingCoordinator(DataUpdateCoordinator):
             self._active_car_is_guest = True
         else:
             self._active_car_is_guest = False
-            self.car = KiaUvoDriver(self.hass, soc_entity_id, device_id)
+            self.car = KiaUvoDriver(self.hass, device_id)
         self._rewire_soc_watcher()
 
     def _rewire_soc_watcher(self) -> None:
         if self._soc_unsub:
             self._soc_unsub()
             self._soc_unsub = None
-        if not self._active_car_is_guest:
-            self._soc_unsub = async_track_state_change_event(
-                self.hass, [self.car.soc_entity_id], self._handle_state_change
-            )
+        if not self._active_car_is_guest and self.car is not None:
+            soc_entity = self.car.soc_entity_id
+            if soc_entity is not None:
+                self._soc_unsub = async_track_state_change_event(
+                    self.hass, [soc_entity], self._handle_state_change
+                )
 
     # ------------------------------------------------------------------
     # Entity ID helpers
@@ -454,7 +454,7 @@ class EvSmartChargingCoordinator(DataUpdateCoordinator):
 
     async def _async_handle_plugin(self) -> None:
         _LOGGER.info("Car plugged in — requesting UVO update, rebuilding schedule in %ss", PLUGIN_DELAY_S)
-        if not self._active_car_is_guest:
+        if not self._active_car_is_guest and self.car is not None:
             await self.car.async_force_update()
 
         @callback
@@ -707,9 +707,13 @@ class EvSmartChargingCoordinator(DataUpdateCoordinator):
 
         self.schedule = slots
 
-        # Set car charge limit to today's target SoC before charging starts
-        if not self._active_car_is_guest:
-            await self.car.async_set_charge_limit(int(target_soc))
+        # Set car charge limit to today's target SoC before charging starts,
+        # but only if the car's current limit differs from the target.
+        if not self._active_car_is_guest and self.car is not None:
+            target_limit = int(target_soc)
+            current_limit = self.car.get_charge_limit()
+            if current_limit != target_limit:
+                await self.car.async_set_charge_limit(target_limit)
 
         self._update_schedule_sensors()
         await self._async_apply_charger_command()
@@ -740,6 +744,11 @@ class EvSmartChargingCoordinator(DataUpdateCoordinator):
         if self._active_car_is_guest:
             _LOGGER.warning(
                 "Guest mode active but manual kWh is 0 for %s — no charging scheduled", day_name
+            )
+            return 0.0
+        if self.car is None:
+            _LOGGER.warning(
+                "No car selected but manual kWh is 0 for %s — no charging scheduled", day_name
             )
             return 0.0
         current_soc = self.car.get_soc()

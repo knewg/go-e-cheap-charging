@@ -1,17 +1,17 @@
-"""EV Smart Charging integration."""
+"""GO-e Cheap Charging integration."""
 from __future__ import annotations
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN, PLATFORMS
-from .coordinator import EvSmartChargingCoordinator
+from .coordinator import ChargingCoordinator
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
 
-    coordinator = EvSmartChargingCoordinator(hass, entry)
+    coordinator = ChargingCoordinator(hass, entry)
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -23,7 +23,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    coordinator: EvSmartChargingCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: ChargingCoordinator = hass.data[DOMAIN][entry.entry_id]
     await coordinator.async_shutdown()
 
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

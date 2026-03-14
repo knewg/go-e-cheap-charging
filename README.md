@@ -1,4 +1,4 @@
-# EV Smart Charging
+# GO-e Cheap Charging
 
 A Home Assistant custom component that charges your EV during the cheapest electricity price slots while respecting household breaker limits — without ever restarting the charging session.
 
@@ -26,9 +26,9 @@ If the price spread across the window is below the configured threshold, all slo
 
 ## Installation
 
-1. Copy `custom_components/ev_smart_charging/` into your HA `config/custom_components/` directory.
+1. Copy `custom_components/goe_cheap_charging/` into your HA `config/custom_components/` directory.
 2. Restart Home Assistant.
-3. Go to **Settings → Devices & Services → Add Integration** and search for **EV Smart Charging**.
+3. Go to **Settings → Devices & Services → Add Integration** and search for **GO-e Cheap Charging**.
 4. Complete the three-step config flow (see [Configuration](#configuration) below).
 5. Place the created entities on your dashboard.
 
@@ -65,30 +65,30 @@ Select three sensor entities (unit: A) for L1, L2, and L3. Any HA-compatible ene
 
 | Entity ID pattern | Type | Description |
 |---|---|---|
-| `switch.ev_charging_{day}_enabled` | Switch | Enable/disable departure for this day |
-| `time.ev_charging_{day}_departure` | Time | Departure time (HH:MM) |
-| `number.ev_charging_{day}_target_soc` | Number (slider, 20–100 %) | Target battery % for this day |
+| `switch.cheap_charging_{day}_enabled` | Switch | Enable/disable departure for this day |
+| `time.cheap_charging_{day}_departure` | Time | Departure time (HH:MM) |
+| `number.cheap_charging_{day}_target_soc` | Number (slider, 20–100 %) | Target battery % for this day |
 
 ### Global controls
 
 | Entity ID | Type | Description |
 |---|---|---|
-| `switch.ev_charging_smart_enabled` | Switch | Master on/off for smart charging |
-| `switch.ev_charging_charge_now` | Switch | Override: charge immediately regardless of price |
+| `switch.cheap_charging_smart_enabled` | Switch | Master on/off for smart charging |
+| `switch.cheap_charging_charge_now` | Switch | Override: charge immediately regardless of price |
 
 ### Thresholds
 
 | Entity ID | Type | Default | Description |
 |---|---|---|---|
-| `number.ev_charging_cheap_price_threshold` | Number (SEK/kWh) | 0.00 | Slots at or below this price are always included (0 = disabled) |
-| `number.ev_charging_price_spread_threshold` | Number (SEK/kWh) | 0.10 | If max − min price in window is below this, charge the full window continuously |
+| `number.cheap_charging_cheap_price_threshold` | Number (SEK/kWh) | 0.00 | Slots at or below this price are always included (0 = disabled) |
+| `number.cheap_charging_price_spread_threshold` | Number (SEK/kWh) | 0.10 | If max − min price in window is below this, charge the full window continuously |
 
 ### Status sensors (read-only)
 
 | Entity ID | Description |
 |---|---|
-| `sensor.ev_charging_schedule` | Human-readable summary of the current charging plan |
-| `sensor.ev_charging_next_slot` | Timestamp of the next selected price slot |
+| `sensor.cheap_charging_schedule` | Human-readable summary of the current charging plan |
+| `sensor.cheap_charging_next_slot` | Timestamp of the next selected price slot |
 
 ## Charging logic
 
@@ -138,4 +138,4 @@ python3 -m pytest tests/test_coordinator.py -v
 ruff check custom_components/
 ```
 
-For manual testing: copy `custom_components/ev_smart_charging/` into your HA `config/custom_components/` directory and restart HA. Logs are at **Settings → System → Logs**.
+For manual testing: copy `custom_components/goe_cheap_charging/` into your HA `config/custom_components/` directory and restart HA. Logs are at **Settings → System → Logs**.

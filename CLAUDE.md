@@ -12,7 +12,7 @@ The component selects the cheapest electricity price slots needed to reach the c
 
 ```
 custom_components/
-  ev_smart_charging/     ← the integration lives here
+  goe_cheap_charging/     ← the integration lives here
     __init__.py
     config_flow.py       ← UI-driven setup, no hard-coded values
     coordinator.py       ← core scheduling + amp-adjustment logic
@@ -37,7 +37,7 @@ python -m pytest tests/test_coordinator.py -v
 ruff check custom_components/
 ```
 
-For manual testing: copy `custom_components/ev_smart_charging/` into your HA `config/custom_components/` directory and restart HA. Check logs at **Settings → System → Logs**.
+For manual testing: copy `custom_components/goe_cheap_charging/` into your HA `config/custom_components/` directory and restart HA. Check logs at **Settings → System → Logs**.
 
 ## Architecture
 
@@ -56,17 +56,17 @@ Everything that a user might want to adjust on the fly is **created as HA entiti
 After setup the integration registers the following entities so they can be placed on HA dashboards:
 
 **Per weekday** (monday–sunday):
-- `switch.ev_charging_{day}_enabled` — whether this day has a departure
-- `time.ev_charging_{day}_departure` — time-of-day picker (HH:MM)
-- `number.ev_charging_{day}_target_soc` — target battery % for this day
+- `switch.cheap_charging_{day}_enabled` — whether this day has a departure
+- `time.cheap_charging_{day}_departure` — time-of-day picker (HH:MM)
+- `number.cheap_charging_{day}_target_soc` — target battery % for this day
 
 **Global controls:**
-- `switch.ev_charging_smart_enabled` — master on/off for smart charging
-- `switch.ev_charging_charge_now` — manual override (charge immediately regardless of price)
+- `switch.cheap_charging_smart_enabled` — master on/off for smart charging
+- `switch.cheap_charging_charge_now` — manual override (charge immediately regardless of price)
 
 **Status (read-only sensors):**
-- `sensor.ev_charging_schedule` — human-readable summary of the current charging plan
-- `sensor.ev_charging_next_slot` — start time of next selected price slot
+- `sensor.cheap_charging_schedule` — human-readable summary of the current charging plan
+- `sensor.cheap_charging_next_slot` — start time of next selected price slot
 
 ### Coordinator (core logic)
 

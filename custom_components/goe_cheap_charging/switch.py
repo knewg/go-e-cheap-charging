@@ -1,4 +1,4 @@
-"""Switch entities for EV Smart Charging."""
+"""Switch entities for GO-e Cheap Charging."""
 from __future__ import annotations
 
 import logging
@@ -10,7 +10,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import DOMAIN, WEEKDAYS
-from .coordinator import EvSmartChargingCoordinator
+from .coordinator import ChargingCoordinator
+from .entity import ev_device_info
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -20,13 +21,13 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    coordinator: EvSmartChargingCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: ChargingCoordinator = hass.data[DOMAIN][entry.entry_id]
     entities: list[SwitchEntity] = [
-        EvSmartChargingMasterSwitch(coordinator, entry),
-        EvChargingChargeNowSwitch(coordinator, entry),
+        MasterSwitch(coordinator, entry),
+        ChargeNowSwitch(coordinator, entry),
     ]
     for day in WEEKDAYS:
-        entities.append(EvChargingDaySwitch(coordinator, entry, day))
+        entities.append(DaySwitch(coordinator, entry, day))
     async_add_entities(entities)
 
 
@@ -35,9 +36,10 @@ class _BaseSwitch(RestoreEntity, SwitchEntity):
 
     _attr_should_poll = False
 
-    def __init__(self, coordinator: EvSmartChargingCoordinator, entry: ConfigEntry) -> None:
+    def __init__(self, coordinator: ChargingCoordinator, entry: ConfigEntry) -> None:
         self._coordinator = coordinator
         self._entry = entry
+        self._attr_device_info = ev_device_info(entry)
 
     async def async_added_to_hass(self) -> None:
         last = await self.async_get_last_state()
@@ -49,13 +51,13 @@ class _BaseSwitch(RestoreEntity, SwitchEntity):
         pass
 
 
-class EvSmartChargingMasterSwitch(_BaseSwitch):
+class MasterSwitch(_BaseSwitch):
     """Master smart-charging enable/disable switch."""
 
-    def __init__(self, coordinator: EvSmartChargingCoordinator, entry: ConfigEntry) -> None:
+    def __init__(self, coordinator: ChargingCoordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry)
         self._attr_unique_id = f"{entry.entry_id}_smart_enabled"
-        self._attr_name = "EV Charging Smart Enabled"
+        self._attr_name = "Cheap Charging Smart Enabled"
 
     @property
     def is_on(self) -> bool:
@@ -79,13 +81,13 @@ class EvSmartChargingMasterSwitch(_BaseSwitch):
         self._coordinator.set_smart_enabled(value)
 
 
-class EvChargingChargeNowSwitch(_BaseSwitch):
+class ChargeNowSwitch(_BaseSwitch):
     """Manual override: charge immediately regardless of price."""
 
-    def __init__(self, coordinator: EvSmartChargingCoordinator, entry: ConfigEntry) -> None:
+    def __init__(self, coordinator: ChargingCoordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry)
         self._attr_unique_id = f"{entry.entry_id}_charge_now"
-        self._attr_name = "EV Charging Charge Now"
+        self._attr_name = "Cheap Charging Charge Now"
 
     @property
     def is_on(self) -> bool:
@@ -111,19 +113,19 @@ class EvChargingChargeNowSwitch(_BaseSwitch):
         self._coordinator.set_charge_now(value)
 
 
-class EvChargingDaySwitch(_BaseSwitch):
+class DaySwitch(_BaseSwitch):
     """Per-weekday enabled toggle."""
 
     def __init__(
         self,
-        coordinator: EvSmartChargingCoordinator,
+        coordinator: ChargingCoordinator,
         entry: ConfigEntry,
         day: str,
     ) -> None:
         super().__init__(coordinator, entry)
         self._day = day
         self._attr_unique_id = f"{entry.entry_id}_{day}_enabled"
-        self._attr_name = f"EV Charging {day.capitalize()} Enabled"
+        self._attr_name = f"Cheap Charging {day.capitalize()} Enabled"
 
     @property
     def is_on(self) -> bool:

@@ -1,4 +1,4 @@
-"""Number entities (target SoC per day) for EV Smart Charging."""
+"""Number entities (target SoC per day) for GO-e Cheap Charging."""
 from __future__ import annotations
 
 from homeassistant.components.number import NumberEntity, NumberMode
@@ -8,7 +8,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import DEFAULT_CHEAP_THRESHOLD, DEFAULT_MANUAL_KWH, DEFAULT_PRICE_SPREAD_THRESHOLD, DEFAULT_TARGET_SOC, DOMAIN, WEEKDAYS
-from .coordinator import EvSmartChargingCoordinator
+from .coordinator import ChargingCoordinator
+from .entity import ev_device_info
 
 
 async def async_setup_entry(
@@ -16,16 +17,16 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    coordinator: EvSmartChargingCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: ChargingCoordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities(
-        [EvChargingTargetSoc(coordinator, entry, day) for day in WEEKDAYS]
-        + [EvChargingManualKwh(coordinator, entry, day) for day in WEEKDAYS]
-        + [EvChargingCheapThreshold(coordinator, entry)]
-        + [EvChargingPriceSpreadThreshold(coordinator, entry)]
+        [TargetSoc(coordinator, entry, day) for day in WEEKDAYS]
+        + [ManualKwh(coordinator, entry, day) for day in WEEKDAYS]
+        + [CheapThreshold(coordinator, entry)]
+        + [PriceSpreadThreshold(coordinator, entry)]
     )
 
 
-class EvChargingTargetSoc(RestoreEntity, NumberEntity):
+class TargetSoc(RestoreEntity, NumberEntity):
     """Per-weekday target SoC slider."""
 
     _attr_should_poll = False
@@ -37,7 +38,7 @@ class EvChargingTargetSoc(RestoreEntity, NumberEntity):
 
     def __init__(
         self,
-        coordinator: EvSmartChargingCoordinator,
+        coordinator: ChargingCoordinator,
         entry: ConfigEntry,
         day: str,
     ) -> None:
@@ -45,7 +46,8 @@ class EvChargingTargetSoc(RestoreEntity, NumberEntity):
         self._entry = entry
         self._day = day
         self._attr_unique_id = f"{entry.entry_id}_{day}_target_soc"
-        self._attr_name = f"EV Charging {day.capitalize()} Target SoC"
+        self._attr_name = f"Cheap Charging {day.capitalize()} Target SoC"
+        self._attr_device_info = ev_device_info(entry)
 
     async def async_added_to_hass(self) -> None:
         last = await self.async_get_last_state()
@@ -66,7 +68,7 @@ class EvChargingTargetSoc(RestoreEntity, NumberEntity):
         await self._coordinator._async_rebuild_schedule()
 
 
-class EvChargingCheapThreshold(RestoreEntity, NumberEntity):
+class CheapThreshold(RestoreEntity, NumberEntity):
     """Global cheap price threshold for opportunistic charging (SEK/kWh, 0 = disabled)."""
 
     _attr_should_poll = False
@@ -78,13 +80,14 @@ class EvChargingCheapThreshold(RestoreEntity, NumberEntity):
 
     def __init__(
         self,
-        coordinator: EvSmartChargingCoordinator,
+        coordinator: ChargingCoordinator,
         entry: ConfigEntry,
     ) -> None:
         self._coordinator = coordinator
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_cheap_price_threshold"
-        self._attr_name = "EV Charging Cheap Price Threshold"
+        self._attr_name = "Cheap Charging Cheap Price Threshold"
+        self._attr_device_info = ev_device_info(entry)
 
     async def async_added_to_hass(self) -> None:
         last = await self.async_get_last_state()
@@ -104,7 +107,7 @@ class EvChargingCheapThreshold(RestoreEntity, NumberEntity):
         await self._coordinator._async_apply_charger_command()
 
 
-class EvChargingPriceSpreadThreshold(RestoreEntity, NumberEntity):
+class PriceSpreadThreshold(RestoreEntity, NumberEntity):
     """Global price spread threshold — if spread < this, charge the whole window."""
 
     _attr_should_poll = False
@@ -116,13 +119,14 @@ class EvChargingPriceSpreadThreshold(RestoreEntity, NumberEntity):
 
     def __init__(
         self,
-        coordinator: EvSmartChargingCoordinator,
+        coordinator: ChargingCoordinator,
         entry: ConfigEntry,
     ) -> None:
         self._coordinator = coordinator
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_price_spread_threshold"
-        self._attr_name = "EV Charging Price Spread Threshold"
+        self._attr_name = "Cheap Charging Price Spread Threshold"
+        self._attr_device_info = ev_device_info(entry)
 
     async def async_added_to_hass(self) -> None:
         last = await self.async_get_last_state()
@@ -142,7 +146,7 @@ class EvChargingPriceSpreadThreshold(RestoreEntity, NumberEntity):
         await self._coordinator._async_rebuild_schedule()
 
 
-class EvChargingManualKwh(RestoreEntity, NumberEntity):
+class ManualKwh(RestoreEntity, NumberEntity):
     """Per-weekday manual kWh override (0 = use SoC-based calculation)."""
 
     _attr_should_poll = False
@@ -154,7 +158,7 @@ class EvChargingManualKwh(RestoreEntity, NumberEntity):
 
     def __init__(
         self,
-        coordinator: EvSmartChargingCoordinator,
+        coordinator: ChargingCoordinator,
         entry: ConfigEntry,
         day: str,
     ) -> None:
@@ -162,7 +166,8 @@ class EvChargingManualKwh(RestoreEntity, NumberEntity):
         self._entry = entry
         self._day = day
         self._attr_unique_id = f"{entry.entry_id}_{day}_manual_kwh"
-        self._attr_name = f"EV Charging {day.capitalize()} Manual kWh"
+        self._attr_name = f"Cheap Charging {day.capitalize()} Manual kWh"
+        self._attr_device_info = ev_device_info(entry)
 
     async def async_added_to_hass(self) -> None:
         last = await self.async_get_last_state()

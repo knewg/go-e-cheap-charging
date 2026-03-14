@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -11,18 +12,33 @@ _LOGGER = logging.getLogger(__name__)
 class KiaUvoDriver:
     """Reads SoC and sends commands via the kia_uvo HA integration."""
 
-    def __init__(
-        self, hass: HomeAssistant, soc_entity_id: str, device_id: str
-    ) -> None:
+    def __init__(self, hass: HomeAssistant, device_id: str) -> None:
         self.hass = hass
-        self.soc_entity_id = soc_entity_id
         self.device_id = device_id
+
+    @property
+    def soc_entity_id(self) -> str | None:
+        """Return the SoC sensor entity ID, discovered from the device registry."""
+        registry = er.async_get(self.hass)
+        entity = next(
+            (
+                e
+                for e in er.async_entries_for_device(registry, self.device_id)
+                if e.domain == "sensor" and e.entity_id.endswith("_ev_battery_level")
+            ),
+            None,
+        )
+        return entity.entity_id if entity is not None else None
 
     def get_soc(self) -> float:
         """Return current battery SoC as a float percent, or 0.0 on failure."""
-        state = self.hass.states.get(self.soc_entity_id)
+        entity_id = self.soc_entity_id
+        if entity_id is None:
+            _LOGGER.warning("Car SoC entity not found in device registry for device %s", self.device_id)
+            return 0.0
+        state = self.hass.states.get(entity_id)
         if state is None or state.state in ("unknown", "unavailable", ""):
-            _LOGGER.warning("Car SoC entity %s unavailable", self.soc_entity_id)
+            _LOGGER.warning("Car SoC entity %s unavailable", entity_id)
             return 0.0
         try:
             return float(state.state)
@@ -38,6 +54,27 @@ class KiaUvoDriver:
             {"device_id": self.device_id},
             blocking=False,
         )
+
+    def get_charge_limit(self) -> int | None:
+        """Return the car's current AC charge limit in percent, or None if unavailable."""
+        registry = er.async_get(self.hass)
+        entity = next(
+            (
+                e
+                for e in er.async_entries_for_device(registry, self.device_id)
+                if e.domain == "number" and e.entity_id.endswith("ac_charging_limit")
+            ),
+            None,
+        )
+        if entity is None:
+            return None
+        state = self.hass.states.get(entity.entity_id)
+        if state is None or state.state in ("unknown", "unavailable", ""):
+            return None
+        try:
+            return int(float(state.state))
+        except ValueError:
+            return None
 
     async def async_set_charge_limit(self, limit_pct: int) -> None:
         """Set the car's AC charge limit via kia_uvo service (safety net).

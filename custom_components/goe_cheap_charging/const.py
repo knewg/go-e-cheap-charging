@@ -1,10 +1,8 @@
-DOMAIN = "ev_smart_charging"
+DOMAIN = "goe_cheap_charging"
 
 # Config entry keys
 CONF_CHARGER_SERIAL = "charger_serial"
-CONF_CAR_SOC_ENTITY = "car_soc_entity"
 CONF_CAR_MAX_SOC_ENTITY = "car_max_soc_entity"
-CONF_CAR_DEVICE_ID = "car_device_id"
 CONF_PHASE_L1_ENTITY = "phase_l1_entity"
 CONF_PHASE_L2_ENTITY = "phase_l2_entity"
 CONF_PHASE_L3_ENTITY = "phase_l3_entity"
@@ -45,7 +43,7 @@ NORDPOOL_PRICES_AVAILABLE_MINUTE = 30
 
 # Defaults
 DEFAULT_BATTERY_CAPACITY = 64.0
-DEFAULT_EFFICIENCY = 0.90
+DEFAULT_EFFICIENCY = 90  # percent (50–100)
 DEFAULT_BREAKER_LIMIT = 20
 DEFAULT_CHARGER_PHASE = 1
 DEFAULT_CHARGER_N_PHASES = 3
