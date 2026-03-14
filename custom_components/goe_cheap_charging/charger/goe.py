@@ -32,7 +32,6 @@ class GoeCharger:
         remainder = topic[len(prefix):]
         # Only handle top-level keys, not /set or /result
         if "/" in remainder:
-            _LOGGER.debug("go-e ignoring subtopic: %s", topic)
             return None
         return remainder
 

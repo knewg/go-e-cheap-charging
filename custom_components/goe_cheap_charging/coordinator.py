@@ -429,7 +429,6 @@ class ChargingCoordinator(DataUpdateCoordinator):
 
     @callback
     def _handle_mqtt_message(self, msg: Any) -> None:
-        _LOGGER.debug("MQTT ← %s : %s", msg.topic, msg.payload)
         key = self.charger.extract_key(msg.topic)
         if key is None:
             return
