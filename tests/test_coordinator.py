@@ -330,3 +330,89 @@ class TestCheapThreshold:
             _make_price_entry(55, 15, 0.50),    # cheap
         ]
         assert _is_current_slot_cheap(1.0, prices) is False
+
+
+# -----------------------------------------------------------------------
+# Far-future departure: window narrowing
+# -----------------------------------------------------------------------
+
+class TestFarFutureDepartureWindow:
+    """Verify that the slot-selection window is limited to 24 h before departure.
+
+    When a departure is e.g. 5 days away the slot window should be
+    [departure - 1 day, departure), not [now, departure).  This prevents
+    today's prices from being selected for a far-future slot.
+    """
+
+    def _apply_window(self, now: datetime, departure_dt: datetime, all_prices: list) -> list:
+        """Replicate the slot-filter logic from coordinator._build_schedule."""
+        window_start = max(now, departure_dt - timedelta(days=1))
+        slots = [
+            {
+                "start": datetime.fromisoformat(s["start"]),
+                "end": datetime.fromisoformat(s["end"]),
+                "price": s["price"],
+            }
+            for s in all_prices
+            if datetime.fromisoformat(s["end"]) > now
+            and datetime.fromisoformat(s["start"]) >= window_start
+            and datetime.fromisoformat(s["start"]) < departure_dt
+        ]
+        return slots, window_start
+
+    def _price_entry(self, start: datetime, price: float) -> dict:
+        end = start + timedelta(minutes=15)
+        return {"start": start.isoformat(), "end": end.isoformat(), "price": price}
+
+    def test_saturday_prices_excluded_for_thursday_departure(self):
+        """Saturday slots must not be selected when departure is Thursday."""
+        saturday = datetime(2026, 3, 14, 12, 0, tzinfo=_UTC)   # today = Saturday
+        thursday = datetime(2026, 3, 19, 7, 0, tzinfo=_UTC)    # departure = Thursday 07:00
+
+        # Build a day's worth of 15-min slots for Saturday (today)
+        saturday_prices = [
+            self._price_entry(saturday + timedelta(minutes=15 * i), float(i + 1))
+            for i in range(96)
+        ]
+
+        slots, window_start = self._apply_window(saturday, thursday, saturday_prices)
+
+        # No Saturday slots should fall within the window
+        assert slots == [], f"Expected no slots, got {len(slots)}"
+
+    def test_window_start_is_day_before_departure(self):
+        """window_start should be departure - 1 day when that is in the future."""
+        saturday = datetime(2026, 3, 14, 12, 0, tzinfo=_UTC)
+        thursday = datetime(2026, 3, 19, 7, 0, tzinfo=_UTC)
+
+        window_start = max(saturday, thursday - timedelta(days=1))
+
+        expected = datetime(2026, 3, 18, 7, 0, tzinfo=_UTC)  # Wednesday 07:00
+        assert window_start == expected
+
+    def test_window_start_is_now_when_within_24h(self):
+        """When departure is < 24 h away, window_start should be now (not in the past)."""
+        now = datetime(2026, 3, 19, 1, 0, tzinfo=_UTC)          # 01:00
+        departure_dt = datetime(2026, 3, 19, 7, 0, tzinfo=_UTC) # 07:00 same day
+
+        window_start = max(now, departure_dt - timedelta(days=1))
+
+        # departure - 1 day is yesterday 07:00, which is before now → window_start = now
+        assert window_start == now
+
+    def test_wednesday_prices_included_for_thursday_departure(self):
+        """Slots in the 24 h window before Thursday departure should be included."""
+        thursday_departure = datetime(2026, 3, 19, 7, 0, tzinfo=_UTC)
+        # window_start = Thu 07:00 - 1 day = Wed 07:00
+        slot_start = datetime(2026, 3, 18, 7, 0, tzinfo=_UTC)
+        now = slot_start  # we arrive exactly at window_start
+
+        wednesday_prices = [
+            self._price_entry(slot_start + timedelta(minutes=15 * i), 1.0)
+            for i in range(8)  # 2 hours of slots (07:00–09:00)
+        ]
+
+        slots, _ = self._apply_window(now, thursday_departure, wednesday_prices)
+
+        # All 8 slots start at or after window_start (Wed 07:00) and before departure
+        assert len(slots) == 8

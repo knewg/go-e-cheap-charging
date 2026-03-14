@@ -37,12 +37,13 @@ class ScheduleSensor(SensorEntity):
     """Human-readable charging schedule summary."""
 
     _attr_should_poll = False
+    _attr_has_entity_name = True
     _attr_icon = "mdi:calendar-clock"
 
     def __init__(self, coordinator: ChargingCoordinator, entry: ConfigEntry) -> None:
         self._coordinator = coordinator
         self._attr_unique_id = f"{entry.entry_id}_schedule"
-        self._attr_name = "Cheap Charging Schedule"
+        self._attr_name = "Schedule"
         self._attr_device_info = ev_device_info(entry)
 
     @property
@@ -51,30 +52,21 @@ class ScheduleSensor(SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict:
-        selected = [s for s in self._coordinator.schedule if s["selected"]]
-        return {
-            "slots": [
-                {
-                    "start": s["start"].isoformat(),
-                    "end": s["end"].isoformat(),
-                    "price": round(s["price"], 4),
-                }
-                for s in sorted(selected, key=lambda s: s["start"])
-            ]
-        }
+        return self._coordinator.get_schedule_debug_attrs()
 
 
 class NextSlotSensor(SensorEntity):
     """Timestamp of the next selected charging slot."""
 
     _attr_should_poll = False
+    _attr_has_entity_name = True
     _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_icon = "mdi:clock-start"
 
     def __init__(self, coordinator: ChargingCoordinator, entry: ConfigEntry) -> None:
         self._coordinator = coordinator
         self._attr_unique_id = f"{entry.entry_id}_next_slot"
-        self._attr_name = "Cheap Charging Next Slot"
+        self._attr_name = "Next Slot"
         self._attr_device_info = ev_device_info(entry)
 
     @property

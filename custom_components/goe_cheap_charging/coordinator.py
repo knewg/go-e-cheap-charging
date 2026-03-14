@@ -36,9 +36,11 @@ from .const import (
     CONF_PHASE_L1_ENTITY,
     CONF_PHASE_L2_ENTITY,
     CONF_PHASE_L3_ENTITY,
+    DEFAULT_CHARGE_NOW_SOC_LIMIT,
     DEFAULT_CHARGER_N_PHASES,
     DEFAULT_CHEAP_THRESHOLD,
     DEFAULT_MANUAL_KWH,
+    DEFAULT_OPPORTUNISTIC_SOC_LIMIT,
     DEFAULT_PRICE_SPREAD_THRESHOLD,
     DEFAULT_TARGET_SOC,
     DOMAIN,
@@ -184,12 +186,22 @@ class ChargingCoordinator(DataUpdateCoordinator):
         self._smart_enabled: bool = False
         self._charge_now: bool = False
         self._cheap_threshold: float = DEFAULT_CHEAP_THRESHOLD
+        self._opportunistic_soc_limit: float = DEFAULT_OPPORTUNISTIC_SOC_LIMIT
+        self._charge_now_soc_limit: float = DEFAULT_CHARGE_NOW_SOC_LIMIT
+        self._last_sent_car_limit: int | None = None
         self._price_spread_threshold: float = DEFAULT_PRICE_SPREAD_THRESHOLD
         self._current_price_data: list[dict] = []
 
-        # Per-day settings: {day: {"enabled": bool, "departure": time|None, "target_soc": int, "manual_kwh": float}}
+        # Debug / status fields
+        self._schedule_status_reason: str = "Initializing..."
+        self._last_kwh_needed: float = 0.0
+        self._last_current_soc: float | None = None
+        self._last_target_soc: int = 0
+        self._next_departure_dt: datetime | None = None
+
+        # Per-day settings: {day: {"departure": time|None, "target_soc": int, "manual_kwh": float}}
         self._day_settings: dict[str, dict] = {
-            day: {"enabled": False, "departure": None, "target_soc": DEFAULT_TARGET_SOC, "manual_kwh": DEFAULT_MANUAL_KWH}
+            day: {"departure": None, "target_soc": DEFAULT_TARGET_SOC, "manual_kwh": DEFAULT_MANUAL_KWH}
             for day in WEEKDAYS
         }
 
@@ -197,6 +209,7 @@ class ChargingCoordinator(DataUpdateCoordinator):
         self._mqtt_unsub: Any = None
         self._state_unsubs: list[Any] = []
         self._amp_adjust_task: asyncio.Task | None = None
+        self._hourly_update_task: asyncio.Task | None = None
         self._tomorrow_retry_cancel: Any = None
         self._pending_rebuild_cancel: Any = None
         self._slot_timer_cancel: Any = None
@@ -229,7 +242,6 @@ class ChargingCoordinator(DataUpdateCoordinator):
         for day in WEEKDAYS:
             entities_to_watch.extend(
                 [
-                    self._entity_id("switch", f"{day}_enabled"),
                     self._entity_id("time", f"{day}_departure"),
                     self._entity_id("number", f"{day}_target_soc"),
                     self._entity_id("number", f"{day}_manual_kwh"),
@@ -269,6 +281,22 @@ class ChargingCoordinator(DataUpdateCoordinator):
                 self.hass,
                 [self._entity_id("number", "price_spread_threshold")],
                 self._handle_spread_threshold_change,
+            )
+        )
+
+        # SoC limit changes — re-evaluate charger command only
+        self._state_unsubs.append(
+            async_track_state_change_event(
+                self.hass,
+                [self._entity_id("number", "opportunistic_soc_limit")],
+                self._handle_opportunistic_soc_limit_change,
+            )
+        )
+        self._state_unsubs.append(
+            async_track_state_change_event(
+                self.hass,
+                [self._entity_id("number", "charge_now_soc_limit")],
+                self._handle_charge_now_soc_limit_change,
             )
         )
 
@@ -355,6 +383,7 @@ class ChargingCoordinator(DataUpdateCoordinator):
         self._state_unsubs.clear()
         if self._amp_adjust_task and not self._amp_adjust_task.done():
             self._amp_adjust_task.cancel()
+        self._stop_hourly_force_update()
         if self._tomorrow_retry_cancel:
             self._tomorrow_retry_cancel()
         if self._pending_rebuild_cancel:
@@ -435,6 +464,7 @@ class ChargingCoordinator(DataUpdateCoordinator):
 
         elif new_car_state == CAR_COMPLETE and prev != CAR_COMPLETE:
             self._transaction_active = False
+            self._last_sent_car_limit = None   # resend limit if car resumes after target SoC increase
             self._stop_amp_adjust()
             _LOGGER.info("Charge complete")
 
@@ -447,6 +477,17 @@ class ChargingCoordinator(DataUpdateCoordinator):
             )
         elif new_car_state != CAR_CHARGING:
             self._stop_amp_adjust()
+
+        # Force update and hourly loop management on charging state transitions
+        if new_car_state == CAR_CHARGING and prev != CAR_CHARGING:
+            if not self._active_car_is_guest and self.car is not None:
+                self.hass.async_create_task(self.car.async_force_update())
+            if self._is_long_charging_block():
+                self._start_hourly_force_update()
+        elif prev == CAR_CHARGING and new_car_state != CAR_CHARGING:
+            self._stop_hourly_force_update()
+            if not self._active_car_is_guest and self.car is not None:
+                self.hass.async_create_task(self.car.async_force_update())
 
     # ------------------------------------------------------------------
     # Plug-in / charge complete
@@ -475,6 +516,64 @@ class ChargingCoordinator(DataUpdateCoordinator):
         if self._amp_adjust_task and not self._amp_adjust_task.done():
             self._amp_adjust_task.cancel()
             self._amp_adjust_task = None
+
+    def _stop_hourly_force_update(self) -> None:
+        if self._hourly_update_task and not self._hourly_update_task.done():
+            self._hourly_update_task.cancel()
+        self._hourly_update_task = None
+
+    def _start_hourly_force_update(self) -> None:
+        self._stop_hourly_force_update()
+        self._hourly_update_task = self.hass.async_create_task(
+            self._async_hourly_force_update_loop()
+        )
+
+    async def _async_hourly_force_update_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(3600)
+                if not self._active_car_is_guest and self.car is not None:
+                    _LOGGER.debug("Hourly force update during long charging block")
+                    await self.car.async_force_update()
+        except asyncio.CancelledError:
+            pass
+
+    def _is_long_charging_block(self) -> bool:
+        """Return True if the current/upcoming charging block exceeds 90 minutes."""
+        now = dt_util.now()
+        # Scheduled: count contiguous selected slots from now forward
+        if self.schedule:
+            upcoming = sorted(
+                [s for s in self.schedule if s["selected"] and s["end"] > now],
+                key=lambda s: s["start"],
+            )
+            if upcoming:
+                block_end = upcoming[0]["end"]
+                for s in upcoming[1:]:
+                    if s["start"] <= block_end:
+                        block_end = max(block_end, s["end"])
+                    else:
+                        break
+                return (block_end - max(now, upcoming[0]["start"])).total_seconds() > 5400
+        # Opportunistic: count consecutive cheap slots remaining
+        if self._current_price_data and self._cheap_threshold > 0:
+            future = sorted(
+                [
+                    e for e in self._current_price_data
+                    if dt_util.parse_datetime(e["end"]) > now
+                    and e["price"] <= self._cheap_threshold
+                ],
+                key=lambda e: e["start"],
+            )
+            if future:
+                block_end = dt_util.parse_datetime(future[0]["end"])
+                for e in future[1:]:
+                    if dt_util.parse_datetime(e["start"]) <= block_end:
+                        block_end = max(block_end, dt_util.parse_datetime(e["end"]))
+                    else:
+                        break
+                return (block_end - now).total_seconds() > 5400
+        return False
 
     # ------------------------------------------------------------------
     # State-change callbacks
@@ -511,6 +610,26 @@ class ChargingCoordinator(DataUpdateCoordinator):
                 pass
         self.hass.async_create_task(self._async_rebuild_schedule())
 
+    @callback
+    def _handle_opportunistic_soc_limit_change(self, event: Any) -> None:
+        new_state = event.data.get("new_state")
+        if new_state and new_state.state not in ("unknown", "unavailable"):
+            try:
+                self._opportunistic_soc_limit = float(new_state.state)
+            except ValueError:
+                pass
+        self.hass.async_create_task(self._async_apply_charger_command())
+
+    @callback
+    def _handle_charge_now_soc_limit_change(self, event: Any) -> None:
+        new_state = event.data.get("new_state")
+        if new_state and new_state.state not in ("unknown", "unavailable"):
+            try:
+                self._charge_now_soc_limit = float(new_state.state)
+            except ValueError:
+                pass
+        self.hass.async_create_task(self._async_apply_charger_command())
+
     # ------------------------------------------------------------------
     # Schedule building
     # ------------------------------------------------------------------
@@ -525,10 +644,6 @@ class ChargingCoordinator(DataUpdateCoordinator):
         from datetime import time as _time
 
         for day in WEEKDAYS:
-            state = self.hass.states.get(self._entity_id("switch", f"{day}_enabled"))
-            if state and state.state not in ("unknown", "unavailable"):
-                self._day_settings[day]["enabled"] = state.state == "on"
-
             state = self.hass.states.get(self._entity_id("number", f"{day}_target_soc"))
             if state and state.state not in ("unknown", "unavailable"):
                 try:
@@ -563,9 +678,10 @@ class ChargingCoordinator(DataUpdateCoordinator):
         _LOGGER.debug(
             "Rebuild schedule: smart_enabled=%s, days=%s",
             self._smart_enabled,
-            {d: self._day_settings[d] for d in WEEKDAYS if self._day_settings[d]["enabled"]},
+            {d: self._day_settings[d] for d in WEEKDAYS if self._day_settings[d]["target_soc"] > 0 or self._day_settings[d]["manual_kwh"] > 0},
         )
         if not self._smart_enabled:
+            self._schedule_status_reason = "Smart charging disabled"
             self.schedule = []
             self._update_schedule_sensors()
             if self._slot_timer_cancel:
@@ -578,6 +694,7 @@ class ChargingCoordinator(DataUpdateCoordinator):
         result = self._find_next_departure()
         if result is None:
             _LOGGER.info("No enabled departure found — clearing schedule")
+            self._schedule_status_reason = "No departure configured for any day"
             self.schedule = []
             self._update_schedule_sensors()
             if self._slot_timer_cancel:
@@ -586,6 +703,8 @@ class ChargingCoordinator(DataUpdateCoordinator):
             return
 
         departure_dt, target_soc, day_name = result
+        self._next_departure_dt = departure_dt
+        self._last_target_soc = int(target_soc)
 
         # Fetch prices
         today_str = dt_util.now().date().isoformat()
@@ -600,6 +719,8 @@ class ChargingCoordinator(DataUpdateCoordinator):
             _LOGGER.warning(
                 "Today's Nordpool prices unavailable — Nordpool may still be starting up, retrying in 5 min"
             )
+            self._schedule_status_reason = "Waiting for Nordpool prices (retry in 5 min)"
+            self._update_schedule_sensors()
             if self._tomorrow_retry_cancel:
                 self._tomorrow_retry_cancel()
             self._tomorrow_retry_cancel = async_call_later(self.hass, 300, _schedule_retry)
@@ -626,6 +747,8 @@ class ChargingCoordinator(DataUpdateCoordinator):
                         "Tomorrow Nordpool prices not yet available — retrying at 13:30 (%.0fs)",
                         delay,
                     )
+                    self._schedule_status_reason = "Waiting for tomorrow's prices (retry at 13:30)"
+                    self._update_schedule_sensors()
                     if self._tomorrow_retry_cancel:
                         self._tomorrow_retry_cancel()
                     self._tomorrow_retry_cancel = async_call_later(self.hass, delay, _schedule_retry)
@@ -637,6 +760,8 @@ class ChargingCoordinator(DataUpdateCoordinator):
                     "Tomorrow prices unavailable after 13:30 — "
                     "Nordpool may still be starting up, retrying in 5 min"
                 )
+                self._schedule_status_reason = "Tomorrow's prices unavailable after 13:30 — retry in 5 min"
+                self._update_schedule_sensors()
                 if self._tomorrow_retry_cancel:
                     self._tomorrow_retry_cancel()
                 self._tomorrow_retry_cancel = async_call_later(self.hass, 300, _schedule_retry)
@@ -646,6 +771,10 @@ class ChargingCoordinator(DataUpdateCoordinator):
 
         all_prices = today_prices + tomorrow_prices
         now = dt_util.now()
+
+        # Only consider slots in the 24 hours immediately before departure,
+        # so a far-future departure (e.g. 5 days away) doesn't pull in today's prices.
+        window_start = max(now, departure_dt - timedelta(days=1))
 
         try:
             slots = [
@@ -657,6 +786,7 @@ class ChargingCoordinator(DataUpdateCoordinator):
                 }
                 for s in all_prices
                 if dt_util.parse_datetime(s["end"]) > now
+                and dt_util.parse_datetime(s["start"]) >= window_start
                 and dt_util.parse_datetime(s["start"]) < departure_dt
             ]
         except (KeyError, TypeError) as err:
@@ -668,7 +798,28 @@ class ChargingCoordinator(DataUpdateCoordinator):
             return
 
         if not slots:
+            if window_start > now:
+                # Departure is far away; the slot window hasn't opened yet.
+                # Retry when we enter the scheduling window (the day before departure).
+                delay = (window_start - now).total_seconds()
+                _LOGGER.info(
+                    "Departure is %s — slot window opens in %.0f hours, scheduling retry",
+                    dt_util.as_local(departure_dt).strftime("%A %H:%M"),
+                    delay / 3600,
+                )
+                self._schedule_status_reason = (
+                    f"Waiting until {dt_util.as_local(window_start).strftime('%a %H:%M')} "
+                    f"to schedule for {dt_util.as_local(departure_dt).strftime('%a %H:%M')} departure"
+                )
+                self._update_schedule_sensors()
+                if self._tomorrow_retry_cancel:
+                    self._tomorrow_retry_cancel()
+                self._tomorrow_retry_cancel = async_call_later(self.hass, delay, _schedule_retry)
+                await self._async_apply_charger_command()  # ensure charger is paused
+                return
             _LOGGER.warning("No future price slots before departure — clearing schedule")
+            dep_str = dt_util.as_local(departure_dt).strftime("%H:%M")
+            self._schedule_status_reason = f"No future price slots before departure at {dep_str}"
             self.schedule = []
             self._update_schedule_sensors()
             if self._slot_timer_cancel:
@@ -677,11 +828,20 @@ class ChargingCoordinator(DataUpdateCoordinator):
             return
 
         kwh_needed = self._get_kwh_needed(target_soc, day_name)
+        self._last_kwh_needed = kwh_needed
         # Use conservative planning speed to avoid under-booking slots
         max_charge_kw = SCHEDULE_PLANNING_AMP * 0.23 * self._charger_n_phases
 
         if kwh_needed < 0.5:
             _LOGGER.info("No charging needed (%.1f kWh needed)", kwh_needed)
+            if self._active_car_is_guest or self.car is None:
+                self._schedule_status_reason = "No kWh needed (guest mode or no car)"
+            elif self._last_current_soc is not None and self._last_current_soc >= target_soc:
+                self._schedule_status_reason = (
+                    f"Already at target ({self._last_current_soc:.0f}% ≥ {target_soc:.0f}%)"
+                )
+            else:
+                self._schedule_status_reason = f"< 0.5 kWh needed ({kwh_needed:.2f} kWh)"
             self.schedule = []
             self._update_schedule_sensors()
             if self._slot_timer_cancel:
@@ -701,19 +861,18 @@ class ChargingCoordinator(DataUpdateCoordinator):
             )
             for s in slots:
                 s["selected"] = True
+            self._schedule_status_reason = (
+                f"All {len(slots)} slots selected (price spread below threshold)"
+            )
         else:
             n_slots = math.ceil(kwh_needed / (max_charge_kw * 0.25))
             _select_slots(slots, n_slots, self._price_spread_threshold)
+            n_selected = sum(1 for s in slots if s["selected"])
+            self._schedule_status_reason = (
+                f"{n_selected} slots selected (cheapest of {len(slots)} available)"
+            )
 
         self.schedule = slots
-
-        # Set car charge limit to today's target SoC before charging starts,
-        # but only if the car's current limit differs from the target.
-        if not self._active_car_is_guest and self.car is not None:
-            target_limit = int(target_soc)
-            current_limit = self.car.get_charge_limit()
-            if current_limit != target_limit:
-                await self.car.async_set_charge_limit(target_limit)
 
         self._update_schedule_sensors()
         await self._async_apply_charger_command()
@@ -752,18 +911,19 @@ class ChargingCoordinator(DataUpdateCoordinator):
             )
             return 0.0
         current_soc = self.car.get_soc()
+        self._last_current_soc = current_soc
         return max(0.0, (target_soc - current_soc) / 100 * self._battery_capacity / self._efficiency)
 
     def _find_next_departure(
         self,
     ) -> tuple[datetime, float, str] | None:
-        """Return (departure_datetime, target_soc, day_name) for the next enabled day."""
+        """Return (departure_datetime, target_soc, day_name) for the next active day."""
         now = dt_util.now()
         for offset in range(7):
             candidate = now + timedelta(days=offset)
             day_name = WEEKDAYS[candidate.weekday()]
             day = self._day_settings[day_name]
-            if not day["enabled"]:
+            if day["target_soc"] <= 0 and day["manual_kwh"] <= 0:
                 continue
             dep_time: time | None = day["departure"]
             if dep_time is None:
@@ -852,6 +1012,7 @@ class ChargingCoordinator(DataUpdateCoordinator):
     async def _async_apply_charger_command(self) -> None:
         """Send frc=2 (charge) or frc=1 (pause) based on schedule and overrides."""
         cheap_slot = self._is_current_slot_cheap()
+        now_price: float | None = None
         if cheap_slot and not self._in_selected_slot() and not self._charge_now:
             now_price = next(
                 (
@@ -867,7 +1028,40 @@ class ChargingCoordinator(DataUpdateCoordinator):
                     now_price,
                     self._cheap_threshold,
                 )
-        should_charge = self._charge_now or self._in_selected_slot() or cheap_slot
+        in_slot = self._in_selected_slot()
+
+        # No cable connected — nothing to do
+        if self.car_state == CAR_IDLE:
+            return
+
+        should_charge = self._charge_now or in_slot or cheap_slot
+
+        # Update status reason to reflect current charging action
+        if self._charge_now:
+            self._schedule_status_reason = "Manual override active — charging regardless of price"
+        elif in_slot:
+            now = dt_util.now()
+            slot = next(
+                (s for s in self.schedule if s["selected"] and s["start"] <= now < s["end"]),
+                None,
+            )
+            if slot:
+                s_start = dt_util.as_local(slot["start"]).strftime("%H:%M")
+                s_end = dt_util.as_local(slot["end"]).strftime("%H:%M")
+                self._schedule_status_reason = f"In selected slot ({s_start}–{s_end})"
+            else:
+                self._schedule_status_reason = "In selected slot"
+        elif cheap_slot:
+            price_str = f"{now_price:.2f}" if now_price is not None else "?"
+            self._schedule_status_reason = (
+                f"Cheap price ({price_str} SEK/kWh ≤ {self._cheap_threshold:.2f} threshold)"
+            )
+        elif not self.schedule or not any(s["selected"] for s in self.schedule):
+            pass  # reason already set by rebuild (e.g. "Smart charging disabled")
+        else:
+            next_time = self.get_next_slot_time()
+            next_str = dt_util.as_local(next_time).strftime("%H:%M") if next_time else "none"
+            self._schedule_status_reason = f"Paused between slots (next: {next_str})"
 
         _LOGGER.debug(
             "Apply charger command: car_state=%s transaction_active=%s "
@@ -876,11 +1070,22 @@ class ChargingCoordinator(DataUpdateCoordinator):
             self._transaction_active,
             should_charge,
             self._charge_now,
-            self._in_selected_slot(),
+            in_slot,
             cheap_slot,
         )
 
         if should_charge:
+            if self._charge_now:
+                desired_limit = int(self._charge_now_soc_limit)
+            elif in_slot:
+                desired_limit = int(self._last_target_soc)
+            else:  # cheap_slot
+                desired_limit = int(self._opportunistic_soc_limit)
+
+            if self.car and not self._active_car_is_guest and desired_limit != self._last_sent_car_limit:
+                await self.car.async_set_charge_limit(desired_limit)
+                self._last_sent_car_limit = desired_limit
+
             if not self._transaction_active:
                 # No session running yet — start one
                 await self.charger.async_start_transaction(force_charge=True)
@@ -890,6 +1095,8 @@ class ChargingCoordinator(DataUpdateCoordinator):
         else:
             if self._transaction_active:
                 await self.charger.async_set_frc(1)
+
+        self._update_schedule_sensors()
 
     # ------------------------------------------------------------------
     # Amp adjustment loop
@@ -954,14 +1161,57 @@ class ChargingCoordinator(DataUpdateCoordinator):
     def get_schedule_summary(self) -> str:
         selected = [s for s in self.schedule if s["selected"]]
         if not selected:
-            return "No schedule"
-        kwh = self._battery_capacity  # approximate; exact value stored during build
+            return self._schedule_status_reason
+
         avg_price = sum(s["price"] for s in selected) / len(selected)
-        next_slot = min(s["start"] for s in selected)
-        return (
-            f"{len(selected)} slots | avg {avg_price:.2f} SEK/kWh | "
-            f"next: {dt_util.as_local(next_slot).strftime('%H:%M')}"
-        )
+        prefix = f"{len(selected)} slots | {avg_price:.2f} SEK avg"
+
+        if self._charge_now:
+            return f"{prefix} | override"
+        if self._in_selected_slot():
+            now = dt_util.now()
+            slot = next(
+                (s for s in selected if s["start"] <= now < s["end"]),
+                None,
+            )
+            if slot:
+                s_start = dt_util.as_local(slot["start"]).strftime("%H:%M")
+                s_end = dt_util.as_local(slot["end"]).strftime("%H:%M")
+                return f"{prefix} | charging ({s_start}–{s_end})"
+        if self._is_current_slot_cheap():
+            return f"{prefix} | cheap price"
+        next_slot = self.get_next_slot_time()
+        if next_slot:
+            return f"{prefix} | paused (next: {dt_util.as_local(next_slot).strftime('%H:%M')})"
+        return f"{prefix} | all slots done"
+
+    def get_schedule_debug_attrs(self) -> dict:
+        """Return rich debug attributes for the schedule sensor."""
+        car_state_names = {1: "idle", 2: "charging", 3: "connected", 4: "complete"}
+        selected = [s for s in self.schedule if s["selected"]]
+        return {
+            "status_reason": self._schedule_status_reason,
+            "kwh_needed": round(self._last_kwh_needed, 2),
+            "current_soc": self._last_current_soc,
+            "target_soc": self._last_target_soc,
+            "departure": (
+                dt_util.as_local(self._next_departure_dt).strftime("%a %H:%M")
+                if self._next_departure_dt
+                else None
+            ),
+            "charger_state": car_state_names.get(self.car_state, str(self.car_state)),
+            "in_selected_slot": self._in_selected_slot(),
+            "charge_now_active": self._charge_now,
+            "cheap_price_active": self._is_current_slot_cheap(),
+            "slots": [
+                {
+                    "start": s["start"].isoformat(),
+                    "end": s["end"].isoformat(),
+                    "price": round(s["price"], 4),
+                }
+                for s in sorted(selected, key=lambda s: s["start"])
+            ],
+        }
 
     def get_next_slot_time(self) -> datetime | None:
         now = dt_util.now()
@@ -974,9 +1224,6 @@ class ChargingCoordinator(DataUpdateCoordinator):
     # Per-day settings (called by entity platform files)
     # ------------------------------------------------------------------
 
-    def set_day_enabled(self, day: str, enabled: bool) -> None:
-        self._day_settings[day]["enabled"] = enabled
-
     def set_day_departure(self, day: str, departure: time | None) -> None:
         self._day_settings[day]["departure"] = departure
 
@@ -988,9 +1235,6 @@ class ChargingCoordinator(DataUpdateCoordinator):
 
     def get_day_manual_kwh(self, day: str) -> float:
         return self._day_settings[day]["manual_kwh"]
-
-    def get_day_enabled(self, day: str) -> bool:
-        return self._day_settings[day]["enabled"]
 
     def get_day_departure(self, day: str) -> time | None:
         return self._day_settings[day]["departure"]
@@ -1021,3 +1265,15 @@ class ChargingCoordinator(DataUpdateCoordinator):
 
     def get_price_spread_threshold(self) -> float:
         return self._price_spread_threshold
+
+    def get_opportunistic_soc_limit(self) -> float:
+        return self._opportunistic_soc_limit
+
+    def set_opportunistic_soc_limit(self, v: float) -> None:
+        self._opportunistic_soc_limit = float(v)
+
+    def get_charge_now_soc_limit(self) -> float:
+        return self._charge_now_soc_limit
+
+    def set_charge_now_soc_limit(self, v: float) -> None:
+        self._charge_now_soc_limit = float(v)

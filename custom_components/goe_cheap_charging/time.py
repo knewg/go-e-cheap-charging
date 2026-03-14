@@ -29,6 +29,7 @@ class DepartureTime(RestoreEntity, TimeEntity):
     """Departure time picker for one weekday."""
 
     _attr_should_poll = False
+    _attr_has_entity_name = True
 
     def __init__(
         self,
@@ -40,7 +41,7 @@ class DepartureTime(RestoreEntity, TimeEntity):
         self._entry = entry
         self._day = day
         self._attr_unique_id = f"{entry.entry_id}_{day}_departure"
-        self._attr_name = f"Cheap Charging {day.capitalize()} Departure"
+        self._attr_name = f"{day.capitalize()} Departure"
         self._attr_device_info = ev_device_info(entry)
 
     async def async_added_to_hass(self) -> None:

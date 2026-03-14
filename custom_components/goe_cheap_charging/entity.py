@@ -10,7 +10,7 @@ from .const import DOMAIN
 def ev_device_info(entry: ConfigEntry) -> DeviceInfo:
     return DeviceInfo(
         identifiers={(DOMAIN, entry.entry_id)},
-        name="GO-e Cheap Charging",
+        name="Cheap Charging",
         manufacturer="Custom",
         model="GO-e Cheap Charger",
     )

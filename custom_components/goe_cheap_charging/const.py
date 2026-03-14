@@ -52,5 +52,7 @@ DEFAULT_MAX_AMP = 16
 DEFAULT_TARGET_SOC = 80
 DEFAULT_MANUAL_KWH = 0.0
 DEFAULT_CHEAP_THRESHOLD = 0.0
+DEFAULT_OPPORTUNISTIC_SOC_LIMIT = 80   # % — cap for cheap-price opportunistic charging
+DEFAULT_CHARGE_NOW_SOC_LIMIT    = 80   # % — cap for manual charge_now override
 DEFAULT_PRICE_SPREAD_THRESHOLD = 0.10   # SEK/kWh — if spread < this, charge continuously
 SCHEDULE_PLANNING_AMP = 10              # A — conservative amp used for slot-count calculation

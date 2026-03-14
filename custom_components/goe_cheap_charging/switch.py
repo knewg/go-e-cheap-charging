@@ -9,7 +9,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import DOMAIN, WEEKDAYS
+from .const import DOMAIN
 from .coordinator import ChargingCoordinator
 from .entity import ev_device_info
 
@@ -22,19 +22,17 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: ChargingCoordinator = hass.data[DOMAIN][entry.entry_id]
-    entities: list[SwitchEntity] = [
+    async_add_entities([
         MasterSwitch(coordinator, entry),
         ChargeNowSwitch(coordinator, entry),
-    ]
-    for day in WEEKDAYS:
-        entities.append(DaySwitch(coordinator, entry, day))
-    async_add_entities(entities)
+    ])
 
 
 class _BaseSwitch(RestoreEntity, SwitchEntity):
     """Base switch with state restoration."""
 
     _attr_should_poll = False
+    _attr_has_entity_name = True
 
     def __init__(self, coordinator: ChargingCoordinator, entry: ConfigEntry) -> None:
         self._coordinator = coordinator
@@ -57,7 +55,7 @@ class MasterSwitch(_BaseSwitch):
     def __init__(self, coordinator: ChargingCoordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry)
         self._attr_unique_id = f"{entry.entry_id}_smart_enabled"
-        self._attr_name = "Cheap Charging Smart Enabled"
+        self._attr_name = "Smart Enabled"
 
     @property
     def is_on(self) -> bool:
@@ -87,7 +85,7 @@ class ChargeNowSwitch(_BaseSwitch):
     def __init__(self, coordinator: ChargingCoordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry)
         self._attr_unique_id = f"{entry.entry_id}_charge_now"
-        self._attr_name = "Cheap Charging Charge Now"
+        self._attr_name = "Charge Now"
 
     @property
     def is_on(self) -> bool:
@@ -113,33 +111,3 @@ class ChargeNowSwitch(_BaseSwitch):
         self._coordinator.set_charge_now(value)
 
 
-class DaySwitch(_BaseSwitch):
-    """Per-weekday enabled toggle."""
-
-    def __init__(
-        self,
-        coordinator: ChargingCoordinator,
-        entry: ConfigEntry,
-        day: str,
-    ) -> None:
-        super().__init__(coordinator, entry)
-        self._day = day
-        self._attr_unique_id = f"{entry.entry_id}_{day}_enabled"
-        self._attr_name = f"Cheap Charging {day.capitalize()} Enabled"
-
-    @property
-    def is_on(self) -> bool:
-        return self._coordinator.get_day_enabled(self._day)
-
-    async def async_turn_on(self, **kwargs) -> None:
-        self._coordinator.set_day_enabled(self._day, True)
-        self.async_write_ha_state()
-        await self._coordinator._async_rebuild_schedule()
-
-    async def async_turn_off(self, **kwargs) -> None:
-        self._coordinator.set_day_enabled(self._day, False)
-        self.async_write_ha_state()
-        await self._coordinator._async_rebuild_schedule()
-
-    async def _async_restore(self, value: bool) -> None:
-        self._coordinator.set_day_enabled(self._day, value)

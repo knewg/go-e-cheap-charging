@@ -26,13 +26,14 @@ class ActiveCarSelect(RestoreEntity, SelectEntity):
     """Dropdown to select the active car or Guest mode."""
 
     _attr_should_poll = False
+    _attr_has_entity_name = True
     _attr_icon = "mdi:car-electric"
 
     def __init__(self, coordinator: ChargingCoordinator, entry: ConfigEntry) -> None:
         self._coordinator = coordinator
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_active_car"
-        self._attr_name = "Cheap Charging Active Car"
+        self._attr_name = "Active Car"
         self._attr_device_info = ev_device_info(entry)
         self._option_map: dict[str, tuple[str, str]] = {}  # label → (soc_entity_id, device_id)
         self._current_option: str = "Guest"
