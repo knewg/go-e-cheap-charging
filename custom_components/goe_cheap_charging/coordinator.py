@@ -456,10 +456,17 @@ class ChargingCoordinator(DataUpdateCoordinator):
         if prev == CAR_IDLE and new_car_state in (CAR_CONNECTED, CAR_CHARGING):
             if self._transaction_active:
                 _LOGGER.info(
-                    "Recovered ongoing session on startup (car=%s) — applying schedule",
+                    "Recovered ongoing session on startup (car=%s) — schedule will apply after rebuild",
                     new_car_state,
                 )
-                self.hass.async_create_task(self._async_apply_charger_command())
+                # Skip _async_apply_charger_command here: schedule is still empty because
+                # retained MQTT messages arrive before _on_ha_started fires. Calling it now
+                # with an empty schedule would send frc=1 (pause) for no reason.
+                # _async_rebuild_schedule() always calls _async_apply_charger_command() at
+                # the end, so the correct frc will be sent once prices are loaded.
+                if self.hass.state == CoreState.running:
+                    # Integration reload mid-session: schedule already exists, safe to apply.
+                    self.hass.async_create_task(self._async_apply_charger_command())
             elif new_car_state == CAR_CONNECTED:
                 self.hass.async_create_task(self._async_handle_plugin())
             else:
