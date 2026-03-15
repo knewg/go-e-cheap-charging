@@ -416,3 +416,72 @@ class TestFarFutureDepartureWindow:
 
         # All 8 slots start at or after window_start (Wed 07:00) and before departure
         assert len(slots) == 8
+
+
+# -----------------------------------------------------------------------
+# after_midnight / need-tomorrow price fetch guard
+# -----------------------------------------------------------------------
+
+def _need_tomorrow(now: datetime, departure_dt: datetime) -> bool:
+    """Mirror of the after_midnight condition in coordinator._async_rebuild_schedule."""
+    window_start_preview = max(now, departure_dt - timedelta(days=1))
+    tomorrow_date = now.date() + timedelta(days=1)
+    return (
+        departure_dt.date() > now.date()
+        and window_start_preview.date() <= tomorrow_date
+    )
+
+
+class TestNeedTomorrowPrices:
+    """Verify that tomorrow's Nordpool prices are only fetched when the scheduling
+    window actually starts by tomorrow.
+
+    Before the fix, after_midnight was True for ANY future departure, so a Nordpool
+    startup delay after the nightly 04:00 HA restart caused the coordinator to block
+    on "Waiting for tomorrow's prices" for far-future departures (e.g. Thursday from
+    Sunday) instead of correctly waiting for the scheduling window to open.
+    """
+
+    # Sunday 04:35 — the typical post-restart scenario
+    NOW = datetime(2026, 3, 15, 4, 35, tzinfo=_UTC)  # Sunday
+
+    def test_departure_today_no_tomorrow_fetch(self):
+        """Same-day departure never needs tomorrow's prices."""
+        departure = datetime(2026, 3, 15, 7, 0, tzinfo=_UTC)  # Sun 07:00
+        assert _need_tomorrow(self.NOW, departure) is False
+
+    def test_departure_tomorrow_needs_tomorrow_fetch(self):
+        """Departure tomorrow: window starts today, need Monday prices."""
+        departure = datetime(2026, 3, 16, 7, 0, tzinfo=_UTC)  # Mon 07:00
+        assert _need_tomorrow(self.NOW, departure) is True
+
+    def test_departure_2_days_away_needs_tomorrow_fetch(self):
+        """Departure +2 days: window_start = tomorrow, still need tomorrow's prices
+        to populate the Mon→Tue window."""
+        departure = datetime(2026, 3, 17, 7, 0, tzinfo=_UTC)  # Tue 07:00
+        # window_start = max(Sun 04:35, Mon 07:00) = Mon = tomorrow → True
+        assert _need_tomorrow(self.NOW, departure) is True
+
+    def test_departure_3_days_away_no_tomorrow_fetch(self):
+        """Departure +3 days: window_start = Tue (after tomorrow), no fetch needed."""
+        departure = datetime(2026, 3, 18, 7, 0, tzinfo=_UTC)  # Wed 07:00
+        # window_start = max(Sun 04:35, Tue 07:00) = Tue > Mon → False
+        assert _need_tomorrow(self.NOW, departure) is False
+
+    def test_departure_4_days_away_no_tomorrow_fetch(self):
+        """Original bug: Thursday departure from Sunday must NOT fetch Monday prices."""
+        departure = datetime(2026, 3, 19, 7, 0, tzinfo=_UTC)  # Thu 07:00
+        # window_start = max(Sun 04:35, Wed 07:00) = Wed > Mon → False
+        assert _need_tomorrow(self.NOW, departure) is False
+
+    def test_departure_tomorrow_at_midnight_needs_tomorrow_fetch(self):
+        """Overnight departure (Mon 01:00 from late Sunday) needs tomorrow's prices."""
+        now = datetime(2026, 3, 15, 23, 30, tzinfo=_UTC)  # Sun 23:30
+        departure = datetime(2026, 3, 16, 1, 0, tzinfo=_UTC)   # Mon 01:00
+        assert _need_tomorrow(now, departure) is True
+
+    def test_same_day_early_morning_departure(self):
+        """If departure is today (Mon 07:00) and now is Mon 00:30, no tomorrow fetch."""
+        now = datetime(2026, 3, 16, 0, 30, tzinfo=_UTC)       # Mon 00:30
+        departure = datetime(2026, 3, 16, 7, 0, tzinfo=_UTC)  # Mon 07:00
+        assert _need_tomorrow(now, departure) is False

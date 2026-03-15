@@ -757,7 +757,27 @@ class ChargingCoordinator(DataUpdateCoordinator):
         self._current_price_data = today_prices
         tomorrow_prices: list[dict] = []
 
-        after_midnight = departure_dt.date() > dt_util.now().date()
+        # Only fetch tomorrow's prices when the scheduling window actually starts by
+        # tomorrow. If the window opens later (e.g. Wednesday for a Thursday departure
+        # and today is Sunday), we don't need Monday's prices — the window_start retry
+        # below will handle re-scheduling when we enter the window. Without this guard,
+        # a Nordpool startup delay (common right after the nightly 04:00 HA restart)
+        # would incorrectly block on "Waiting for tomorrow's prices" for far-future
+        # departures instead of falling through to the correct "Waiting until Wed 07:00"
+        # message.
+        _window_start_preview = max(dt_util.now(), departure_dt - timedelta(days=1))
+        _tomorrow_date = dt_util.now().date() + timedelta(days=1)
+        # A midnight (00:00) departure on tomorrow's date means the scheduling
+        # window ends exactly at tomorrow's first second — no tomorrow slots can
+        # pass the `start < departure_dt` filter, so tomorrow's prices aren't needed.
+        _departure_is_tomorrow_midnight = (
+            departure_dt.date() == _tomorrow_date and departure_dt.time() == time(0, 0)
+        )
+        after_midnight = (
+            departure_dt.date() > dt_util.now().date()
+            and _window_start_preview.date() <= _tomorrow_date
+            and not _departure_is_tomorrow_midnight
+        )
         if after_midnight:
             tomorrow_prices = await self._async_fetch_nordpool_prices(tomorrow_str)
             if not tomorrow_prices:
@@ -946,7 +966,7 @@ class ChargingCoordinator(DataUpdateCoordinator):
     ) -> tuple[datetime, float, str] | None:
         """Return (departure_datetime, target_soc, day_name) for the next active day."""
         now = dt_util.now()
-        for offset in range(7):
+        for offset in range(8):
             candidate = now + timedelta(days=offset)
             day_name = WEEKDAYS[candidate.weekday()]
             day = self._day_settings[day_name]
