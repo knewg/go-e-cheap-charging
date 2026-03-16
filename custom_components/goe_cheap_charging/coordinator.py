@@ -446,6 +446,8 @@ class ChargingCoordinator(DataUpdateCoordinator):
 
     def _handle_car_state(self, new_car_state: int) -> None:
         prev = self.car_state
+        if new_car_state == prev:
+            return
         self.car_state = new_car_state
 
         _LOGGER.info(
@@ -833,7 +835,7 @@ class ChargingCoordinator(DataUpdateCoordinator):
                 }
                 for s in all_prices
                 if dt_util.parse_datetime(s["end"]) > now
-                and dt_util.parse_datetime(s["start"]) >= window_start
+                and dt_util.parse_datetime(s["end"]) > window_start
                 and dt_util.parse_datetime(s["start"]) < departure_dt
             ]
         except (KeyError, TypeError) as err:
@@ -1146,7 +1148,10 @@ class ChargingCoordinator(DataUpdateCoordinator):
                 await self.charger.async_start_transaction(force_charge=True)
                 self._transaction_active = True
             else:
-                _LOGGER.debug("Resuming charge: frc=2 (car_state=%s)", self.car_state)
+                if self.car_state == CAR_CHARGING:
+                    _LOGGER.debug("Confirming charge continues: frc=2 (already charging)")
+                else:
+                    _LOGGER.debug("Resuming charge: frc=2 (car_state=%s)", self.car_state)
                 await self.charger.async_set_frc(2)
         else:
             if self._transaction_active:

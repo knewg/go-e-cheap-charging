@@ -1571,7 +1571,9 @@ class TestPluginScenarios:
         nordpool = _c.make_nordpool_prices(PRICES_SOLAR_DIP, midnight)
         fake_hass.services.set_nordpool(now.date().isoformat(), nordpool)
 
-        coord = _c.make_coordinator(fake_hass, soc=50)
+        # soc=79% so only ~4 slots needed — the cheap 10:00 window is sufficient
+        # and the expensive 09:45-10:00 in-progress slot is NOT selected.
+        coord = _c.make_coordinator(fake_hass, soc=79)
         coord.car_state = CAR_CONNECTED
         coord._transaction_active = True
         _c.set_smart_enabled(fake_hass, True)
@@ -1584,7 +1586,7 @@ class TestPluginScenarios:
         assert len(coord.schedule) > 0
         selected = [s for s in coord.schedule if s["selected"]]
         assert len(selected) > 0
-        # Should not be charging yet (10:00 not reached)
+        # Should not be charging yet (09:45 slot is expensive — not selected)
         cmds_rebuild = _c.mqtt_commands(mqtt_log)
         assert cmds_rebuild.get("frc") == 1  # paused
 
@@ -1648,6 +1650,38 @@ class TestPluginScenarios:
         assert "frc" in keys
         # No new trx=1
         assert "trx" not in keys
+
+    @pytest.mark.asyncio
+    async def test_ha_restart_mid_slot_continues_charging(
+        self, fake_hass, mqtt_log
+    ):
+        """Regression: HA restarts 5 min into a cheap slot.
+        The in-progress slot must be included in the schedule so charging
+        is not interrupted (frc=2), not stopped (frc=1)."""
+        # Restart at 04:35 — 5 minutes into the cheap 04:30-04:45 slot
+        now = datetime(2026, 3, 16, 4, 35, tzinfo=_UTC)
+        day = _weekday_name(now)
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        departure = "09:00"
+
+        nordpool = _c.make_nordpool_prices(PRICES_OVERNIGHT_CHEAP, midnight)
+        fake_hass.services.set_nordpool(now.date().isoformat(), nordpool)
+
+        coord = _c.make_coordinator(fake_hass, soc=70)
+        coord.car_state = CAR_CHARGING
+        coord._transaction_active = True
+        _c.set_smart_enabled(fake_hass, True)
+        _c.set_day_config(fake_hass, day, departure, target_soc=80)
+
+        with _c.freeze_now(now):
+            await coord._async_rebuild_schedule()
+
+        cmds = _c.mqtt_commands(mqtt_log)
+        # Must continue charging — NOT send frc=1 just because we restarted mid-slot
+        assert cmds.get("frc") == 2, (
+            "frc=1 was sent after restart mid-slot — charging was interrupted unnecessarily"
+        )
+        assert "trx" not in _c.all_mqtt_keys(mqtt_log)
 
 
 # ============================================================================
