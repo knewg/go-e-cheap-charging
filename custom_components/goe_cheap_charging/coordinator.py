@@ -1235,7 +1235,8 @@ class ChargingCoordinator(DataUpdateCoordinator):
             return self._schedule_status_reason
 
         avg_price = sum(s["price"] for s in selected) / len(selected)
-        prefix = f"{len(selected)} slots | {avg_price:.2f} SEK avg"
+        est_cost = self._last_kwh_needed * avg_price
+        prefix = f"{len(selected)} slots | ~{est_cost:.2f} SEK | {avg_price:.2f} SEK/kWh avg"
 
         if self._charge_now:
             return f"{prefix} | override"
@@ -1260,9 +1261,11 @@ class ChargingCoordinator(DataUpdateCoordinator):
         """Return rich debug attributes for the schedule sensor."""
         car_state_names = {1: "idle", 2: "charging", 3: "connected", 4: "complete"}
         selected = [s for s in self.schedule if s["selected"]]
+        avg_price = sum(s["price"] for s in selected) / len(selected) if selected else 0.0
         return {
             "status_reason": self._schedule_status_reason,
             "kwh_needed": round(self._last_kwh_needed, 2),
+            "estimated_cost_sek": round(self._last_kwh_needed * avg_price, 2),
             "current_soc": self._last_current_soc,
             "target_soc": self._last_target_soc,
             "departure": (
