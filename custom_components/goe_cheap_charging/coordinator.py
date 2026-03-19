@@ -931,7 +931,9 @@ class ChargingCoordinator(DataUpdateCoordinator):
 
         selected = [s for s in slots if s["selected"]]
         if selected:
-            avg_price = sum(s["price"] for s in selected) / len(selected) + self._get_transit_cost()
+            spot_avg = sum(s["price"] for s in selected) / len(selected)
+            transit_cost = self._get_transit_cost()
+            avg_price = spot_avg + transit_cost
             est_cost = kwh_needed * avg_price
             next_slot = min(s["start"] for s in selected)
             _LOGGER.info(
@@ -1248,9 +1250,10 @@ class ChargingCoordinator(DataUpdateCoordinator):
         if not selected:
             return self._schedule_status_reason
 
-        avg_price = sum(s["price"] for s in selected) / len(selected) + self._get_transit_cost()
-        est_cost = self._last_kwh_needed * avg_price
-        prefix = f"{len(selected)} slots | ~{est_cost:.2f} SEK | {avg_price:.2f} SEK/kWh avg"
+        spot_avg = sum(s["price"] for s in selected) / len(selected)
+        transit_cost = self._get_transit_cost()
+        est_cost = self._last_kwh_needed * (spot_avg + transit_cost)
+        prefix = f"{len(selected)} slots | ~{est_cost:.2f} SEK | {spot_avg:.2f} SEK/kWh spot avg"
 
         if self._charge_now:
             return f"{prefix} | override"
@@ -1275,11 +1278,12 @@ class ChargingCoordinator(DataUpdateCoordinator):
         """Return rich debug attributes for the schedule sensor."""
         car_state_names = {1: "idle", 2: "charging", 3: "connected", 4: "complete"}
         selected = [s for s in self.schedule if s["selected"]]
-        avg_price = (sum(s["price"] for s in selected) / len(selected) if selected else 0.0) + self._get_transit_cost()
+        spot_avg = sum(s["price"] for s in selected) / len(selected) if selected else 0.0
+        transit_cost = self._get_transit_cost()
         return {
             "status_reason": self._schedule_status_reason,
             "kwh_needed": round(self._last_kwh_needed, 2),
-            "estimated_cost_sek": round(self._last_kwh_needed * avg_price, 2),
+            "estimated_cost_sek": round(self._last_kwh_needed * (spot_avg + transit_cost), 2),
             "current_soc": self._last_current_soc,
             "target_soc": self._last_target_soc,
             "departure": (
