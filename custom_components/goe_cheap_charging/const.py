@@ -13,6 +13,7 @@ CONF_CHARGER_PHASE = "charger_phase"
 CONF_CHARGER_N_PHASES = "charger_n_phases"
 CONF_MIN_AMP = "min_amp"
 CONF_MAX_AMP = "max_amp"
+CONF_TRANSIT_COST_ENTITY = "transit_cost_entity"
 
 # MQTT topics — go-e API v2: individual topic per parameter
 MQTT_STATUS_TOPIC = "go-eCharger/{serial}/#"       # wildcard subscription

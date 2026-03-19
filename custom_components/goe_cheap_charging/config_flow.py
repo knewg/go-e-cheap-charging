@@ -33,6 +33,7 @@ from .const import (
     CONF_PHASE_L1_ENTITY,
     CONF_PHASE_L2_ENTITY,
     CONF_PHASE_L3_ENTITY,
+    CONF_TRANSIT_COST_ENTITY,
     DEFAULT_BATTERY_CAPACITY,
     DEFAULT_BREAKER_LIMIT,
     DEFAULT_CHARGER_N_PHASES,
@@ -70,6 +71,21 @@ def _amp_sensor_entities(hass: HomeAssistant) -> list[str]:
         state = hass.states.get(entry.entity_id)
         if state and state.attributes.get("unit_of_measurement") == "A":
             result.append(entry.entity_id)
+    return sorted(result)
+
+
+def _price_sensor_entities(hass: HomeAssistant) -> list[str]:
+    """Return sensor entities that look like price-per-kWh sensors."""
+    reg = er.async_get(hass)
+    result = []
+    for entry in reg.entities.values():
+        if entry.domain != "sensor":
+            continue
+        state = hass.states.get(entry.entity_id)
+        if state:
+            uom = state.attributes.get("unit_of_measurement", "")
+            if "kWh" in uom or "kwh" in uom.lower():
+                result.append(entry.entity_id)
     return sorted(result)
 
 
@@ -134,10 +150,14 @@ class ChargingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_electrical(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step 2: phase current sensors."""
+        """Step 2: phase current sensors and optional transit cost sensor."""
         amp_sensors = _amp_sensor_entities(self.hass)
+        price_sensors = _price_sensor_entities(self.hass)
 
         if user_input is not None:
+            # Store empty string as None so coordinator can treat missing as "no sensor"
+            if not user_input.get(CONF_TRANSIT_COST_ENTITY):
+                user_input[CONF_TRANSIT_COST_ENTITY] = None
             self._data.update(user_input)
             if self._reconfigure:
                 return self.async_update_reload_and_abort(
@@ -146,11 +166,13 @@ class ChargingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_create_entry(title="GO-e Cheap Charging", data=self._data)
 
         cur = self._data
+        transit_options = [""] + price_sensors
         schema = vol.Schema(
             {
                 vol.Required(CONF_PHASE_L1_ENTITY, default=cur.get(CONF_PHASE_L1_ENTITY)): vol.In(amp_sensors) if amp_sensors else str,
                 vol.Required(CONF_PHASE_L2_ENTITY, default=cur.get(CONF_PHASE_L2_ENTITY)): vol.In(amp_sensors) if amp_sensors else str,
                 vol.Required(CONF_PHASE_L3_ENTITY, default=cur.get(CONF_PHASE_L3_ENTITY)): vol.In(amp_sensors) if amp_sensors else str,
+                vol.Optional(CONF_TRANSIT_COST_ENTITY, default=cur.get(CONF_TRANSIT_COST_ENTITY) or ""): SelectSelector(SelectSelectorConfig(options=transit_options, mode=SelectSelectorMode.DROPDOWN)) if transit_options else TextSelector(),
             }
         )
 

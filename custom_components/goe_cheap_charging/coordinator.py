@@ -36,6 +36,7 @@ from .const import (
     CONF_PHASE_L1_ENTITY,
     CONF_PHASE_L2_ENTITY,
     CONF_PHASE_L3_ENTITY,
+    CONF_TRANSIT_COST_ENTITY,
     DEFAULT_CHARGE_NOW_SOC_LIMIT,
     DEFAULT_CHARGER_N_PHASES,
     DEFAULT_CHEAP_THRESHOLD,
@@ -172,6 +173,7 @@ class ChargingCoordinator(DataUpdateCoordinator):
             cfg[CONF_PHASE_L2_ENTITY],
             cfg[CONF_PHASE_L3_ENTITY],
         ]
+        self._transit_cost_entity: str | None = cfg.get(CONF_TRANSIT_COST_ENTITY)
 
         self.charger = GoeCharger(hass, self._serial)
         self.car: KiaUvoDriver | None = None
@@ -929,7 +931,7 @@ class ChargingCoordinator(DataUpdateCoordinator):
 
         selected = [s for s in slots if s["selected"]]
         if selected:
-            avg_price = sum(s["price"] for s in selected) / len(selected)
+            avg_price = sum(s["price"] for s in selected) / len(selected) + self._get_transit_cost()
             est_cost = kwh_needed * avg_price
             next_slot = min(s["start"] for s in selected)
             _LOGGER.info(
@@ -943,6 +945,18 @@ class ChargingCoordinator(DataUpdateCoordinator):
                 day_name,
                 departure_dt.strftime("%H:%M"),
             )
+
+    def _get_transit_cost(self) -> float:
+        """Return transit/network cost in SEK/kWh from the configured sensor, or 0.0."""
+        if not self._transit_cost_entity:
+            return 0.0
+        state = self.hass.states.get(self._transit_cost_entity)
+        if state is None:
+            return 0.0
+        try:
+            return float(state.state)
+        except (ValueError, TypeError):
+            return 0.0
 
     def _get_kwh_needed(self, target_soc: float, day_name: str) -> float:
         """Return kWh needed: manual override if set, else SoC-based calculation."""
@@ -1234,7 +1248,7 @@ class ChargingCoordinator(DataUpdateCoordinator):
         if not selected:
             return self._schedule_status_reason
 
-        avg_price = sum(s["price"] for s in selected) / len(selected)
+        avg_price = sum(s["price"] for s in selected) / len(selected) + self._get_transit_cost()
         est_cost = self._last_kwh_needed * avg_price
         prefix = f"{len(selected)} slots | ~{est_cost:.2f} SEK | {avg_price:.2f} SEK/kWh avg"
 
@@ -1261,7 +1275,7 @@ class ChargingCoordinator(DataUpdateCoordinator):
         """Return rich debug attributes for the schedule sensor."""
         car_state_names = {1: "idle", 2: "charging", 3: "connected", 4: "complete"}
         selected = [s for s in self.schedule if s["selected"]]
-        avg_price = sum(s["price"] for s in selected) / len(selected) if selected else 0.0
+        avg_price = (sum(s["price"] for s in selected) / len(selected) if selected else 0.0) + self._get_transit_cost()
         return {
             "status_reason": self._schedule_status_reason,
             "kwh_needed": round(self._last_kwh_needed, 2),
