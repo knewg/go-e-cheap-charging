@@ -4,9 +4,9 @@ A Home Assistant custom component that charges your EV during the cheapest elect
 
 ## How it works
 
-When the car is plugged in, the component calculates how many 1-hour price buckets are needed to reach the day's target SoC before departure. It selects the cheapest buckets in that window and stores a schedule. At each slot boundary it sends a `frc=2` (resume) or `frc=1` (pause) command to the Go-e charger via MQTT. Every 30 seconds while charging, it reads L1/L2/L3 phase currents and trims or raises the charging current to stay within the household breaker limit — no session restarts, only in-session `amp` adjustments.
+When the car is plugged in, the component calculates how many 15-minute price slots are needed to reach the day's target SoC before departure. It selects the cheapest slots in that window and stores a schedule. At each slot boundary it sends a `frc=2` (resume) or `frc=1` (pause) command to the Go-e charger via MQTT. Every 30 seconds while charging, it reads L1/L2/L3 phase currents and trims or raises the charging current to stay within the household breaker limit — no session restarts, only in-session `amp` adjustments.
 
-If the price spread across the window is below the configured threshold, all slots are selected and the car charges continuously at the cheapest possible time rather than cherry-picking isolated hours.
+If the price spread across the window is below the configured threshold, all slots are selected and the car charges continuously rather than cherry-picking isolated slots.
 
 ## Prerequisites
 
@@ -29,59 +29,72 @@ If the price spread across the window is below the configured threshold, all slo
 1. Copy `custom_components/goe_cheap_charging/` into your HA `config/custom_components/` directory.
 2. Restart Home Assistant.
 3. Go to **Settings → Devices & Services → Add Integration** and search for **GO-e Cheap Charging**.
-4. Complete the three-step config flow (see [Configuration](#configuration) below).
+4. Complete the config flow (see [Configuration](#configuration) below).
 5. Place the created entities on your dashboard.
 
 ## Configuration
 
-The config flow has three steps. All values can be changed at any time through the entities the integration creates.
+The config flow has two steps (three if the charger is single-phase). All values can be changed at any time through the entities the integration creates, or by using **Reconfigure** on the integration.
 
-### Step 1 — Charger and car
+### Step 1 — Charger and battery parameters
+
+| Field | Default | Description |
+|---|---|---|
+| Charger serial | — | Go-e charger serial number (auto-discovered from go-e MQTT entities, or entered manually) |
+| Battery capacity (kWh) | 64.0 | Usable battery size |
+| Charge efficiency | 90 % | AC→battery efficiency (50–100 %) |
+| Breaker limit (A) | 20 | Household main breaker per phase |
+| Number of phases | 3 | `1` for single-phase charger, `3` for three-phase |
+| Min charge amps | 6 | Lower bound for amp adjustment (6–32 A) |
+| Max charge amps | 16 | Upper bound for amp adjustment (6–32 A) |
+
+### Step 1b — Charger phase *(single-phase only)*
+
+If **Number of phases** is `1`, an extra step asks which household phase (1, 2, or 3) the charger is wired to. This is needed so the amp-adjustment logic can correctly subtract the charger's contribution when calculating household headroom.
+
+### Step 2 — Electrical sensors
 
 | Field | Description |
 |---|---|
-| Charger serial | Go-e charger serial number (used to build MQTT topic) |
-| Car SoC entity | Kia UVO battery level sensor |
-| Car device ID | Kia UVO device ID (for `force_update` calls) |
-
-### Step 2 — Phase current sensors
-
-Select three sensor entities (unit: A) for L1, L2, and L3. Any HA-compatible energy meter works.
-
-### Step 3 — Battery and charger parameters
-
-| Parameter | Default | Range |
-|---|---|---|
-| Battery capacity (kWh) | 64.0 | — |
-| Charge efficiency | 0.90 | 0.5 – 1.0 |
-| Breaker limit (A) | 20 | 10 – 63 |
-| Charger phase | 1 | 1 / 2 / 3 |
-| Min charge amps | 6 | 6 – 32 |
-| Max charge amps | 16 | 6 – 32 |
+| L1 current sensor | HA sensor entity (unit: A) for phase 1 |
+| L2 current sensor | HA sensor entity (unit: A) for phase 2 |
+| L3 current sensor | HA sensor entity (unit: A) for phase 3 |
+| Transit cost sensor *(optional)* | Price-per-kWh sensor for grid transit fees (added to spot price in schedule display) |
 
 ## Entities created by the integration
 
-### Per weekday (monday – sunday, 21 entities total)
-
-| Entity ID pattern | Type | Description |
-|---|---|---|
-| `switch.cheap_charging_{day}_enabled` | Switch | Enable/disable departure for this day |
-| `time.cheap_charging_{day}_departure` | Time | Departure time (HH:MM) |
-| `number.cheap_charging_{day}_target_soc` | Number (slider, 20–100 %) | Target battery % for this day |
-
-### Global controls
+### Car selection
 
 | Entity ID | Type | Description |
 |---|---|---|
-| `switch.cheap_charging_smart_enabled` | Switch | Master on/off for smart charging |
-| `switch.cheap_charging_charge_now` | Switch | Override: charge immediately regardless of price |
+| `select.cheap_charging_active_car` | Select | Choose which Kia UVO vehicle to charge, or **Guest** mode (no SoC-based scheduling) |
 
-### Thresholds
+The dropdown is auto-populated from discovered Kia UVO devices. In **Guest** mode no SoC reading is attempted and per-day target SoC is ignored.
+
+### Per weekday (monday – sunday, 28 entities total)
+
+| Entity ID pattern | Type | Default | Description |
+|---|---|---|---|
+| `switch.cheap_charging_{day}_enabled` | Switch | off | Enable/disable departure scheduling for this day |
+| `time.cheap_charging_{day}_departure` | Time | 07:00 | Departure time (HH:MM) |
+| `number.cheap_charging_{day}_target_soc` | Number (slider, 0–100 %) | 80 | Target battery % for this day |
+| `number.cheap_charging_{day}_manual_kwh` | Number (slider, 0–100 kWh) | 0.0 | Manual kWh override; if > 0, replaces SoC-based energy calculation |
+
+### Global controls
 
 | Entity ID | Type | Default | Description |
 |---|---|---|---|
-| `number.cheap_charging_cheap_price_threshold` | Number (SEK/kWh) | 0.00 | Slots at or below this price are always included (0 = disabled) |
+| `switch.cheap_charging_smart_enabled` | Switch | on | Master on/off for smart charging |
+| `switch.cheap_charging_charge_now` | Switch | off | Override: charge immediately regardless of price (resets to off on HA restart) |
+
+### Thresholds and limits
+
+| Entity ID | Type | Default | Description |
+|---|---|---|---|
+| `number.cheap_charging_cheap_price_threshold` | Number (SEK/kWh) | 0.00 | Slots at or below this price are always included regardless of schedule (0 = disabled) |
 | `number.cheap_charging_price_spread_threshold` | Number (SEK/kWh) | 0.10 | If max − min price in window is below this, charge the full window continuously |
+| `number.cheap_charging_opportunistic_soc_limit` | Number (slider, 0–100 %) | 80 | SoC cap for opportunistic cheap-price charging |
+| `number.cheap_charging_charge_now_soc_limit` | Number (slider, 0–100 %) | 80 | SoC cap when **Charge Now** override is active |
 
 ### Status sensors (read-only)
 
@@ -94,19 +107,22 @@ Select three sensor entities (unit: A) for L1, L2, and L3. Any HA-compatible ene
 
 ### Schedule building
 
-Triggered whenever price data, car SoC, departure settings, or the smart-enabled switch changes, and on plug-in.
+Triggered whenever price data, car SoC, departure settings, the smart-enabled switch, or the active car selection changes, and on plug-in.
 
-1. Find the next enabled departure day and read its `target_soc` and `departure` entities.
+1. Find the next enabled departure day and read its `target_soc`, `manual_kwh`, and `departure` entities.
 2. Fetch Nordpool price slots for today and (if needed) tomorrow.
 3. Filter to slots that are in the future and before the departure time.
-4. Calculate energy needed: `(target_soc − current_soc) / 100 × capacity_kWh / efficiency`.
-5. Determine how many 1-hour buckets are needed using a conservative 10 A planning current.
-6. Apply spread check:
+4. Calculate energy needed:
+   - If `manual_kwh` > 0: use that value directly.
+   - Otherwise: `(target_soc − current_soc) / 100 × capacity_kWh / efficiency`.
+5. Determine how many 15-minute slots are needed using a planning current of 10 A.
+6. Apply spread and threshold checks:
 
 | Condition | Behaviour |
 |---|---|
-| Price spread < threshold | Select all slots (charge continuously) |
-| Price spread >= threshold | Select the N cheapest 1-hour buckets; fill any single-slot gaps between selected buckets |
+| Price spread < spread threshold | Select all slots (charge continuously) |
+| Slot price ≤ cheap price threshold | Always include slot (opportunistic), subject to `opportunistic_soc_limit` |
+| Otherwise | Select the N cheapest 15-minute slots; fill any single-slot gaps between selected slots |
 
 If tomorrow's prices are not yet available, schedule building is deferred and retried after 13:30 local time (Nordpool publishes next-day prices around that time).
 
@@ -115,6 +131,7 @@ If tomorrow's prices are not yet available, schedule building is deferred and re
 - **In a selected slot** (or `charge_now` override active): send `frc=2` to resume.
 - **Outside a selected slot**: send `frc=1` to pause.
 - `trx=1` (start transaction) is sent **only once per plug-in event**, never again during the session.
+- `charge_now` is subject to `charge_now_soc_limit` — charging stops if the current SoC meets or exceeds the limit.
 
 ### Amp adjustment
 
