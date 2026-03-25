@@ -36,6 +36,7 @@ from .const import (
     CONF_PHASE_L1_ENTITY,
     CONF_PHASE_L2_ENTITY,
     CONF_PHASE_L3_ENTITY,
+    CHARGE_START_WATCHDOG_S,
     CONF_TRANSIT_COST_ENTITY,
     DEFAULT_CHARGE_NOW_SOC_LIMIT,
     DEFAULT_CHARGER_N_PHASES,
@@ -215,6 +216,7 @@ class ChargingCoordinator(DataUpdateCoordinator):
         self._tomorrow_retry_cancel: Any = None
         self._pending_rebuild_cancel: Any = None
         self._slot_timer_cancel: Any = None
+        self._charge_start_watchdog_cancel: Any = None
 
         # References to sensor entities for pushing state updates
         self._schedule_sensor: Any = None
@@ -393,6 +395,8 @@ class ChargingCoordinator(DataUpdateCoordinator):
             self._pending_rebuild_cancel()
         if self._slot_timer_cancel:
             self._slot_timer_cancel()
+        if self._charge_start_watchdog_cancel:
+            self._charge_start_watchdog_cancel()
 
     # ------------------------------------------------------------------
     # Active car management
@@ -484,6 +488,12 @@ class ChargingCoordinator(DataUpdateCoordinator):
             self._last_sent_car_limit = None   # resend limit if car resumes after target SoC increase
             self._stop_amp_adjust()
             _LOGGER.info("Charge complete")
+
+        # Cancel charge-start watchdog when the car enters charging, disconnects, or completes
+        if new_car_state in (CAR_CHARGING, CAR_IDLE, CAR_COMPLETE):
+            if self._charge_start_watchdog_cancel:
+                self._charge_start_watchdog_cancel()
+                self._charge_start_watchdog_cancel = None
 
         # Start/stop amp-adjust loop
         if new_car_state == CAR_CHARGING and (
@@ -1074,6 +1084,35 @@ class ChargingCoordinator(DataUpdateCoordinator):
     # Charger control
     # ------------------------------------------------------------------
 
+    def _arm_charge_start_watchdog(self) -> None:
+        """Start (or reset) a watchdog that fires if the car hasn't started charging within CHARGE_START_WATCHDOG_S.
+
+        If frc=2 was sent but the car stays in state 3, the Go-e charger's transaction may
+        have silently expired.  The watchdog detects this, clears _transaction_active, and
+        retries _async_apply_charger_command which will send trx=1+frc=2 to restart the
+        session.
+        """
+        if self._charge_start_watchdog_cancel:
+            self._charge_start_watchdog_cancel()
+            self._charge_start_watchdog_cancel = None
+
+        @callback
+        def _on_watchdog_fired(_now: Any) -> None:
+            self._charge_start_watchdog_cancel = None
+            if self.car_state != CAR_CONNECTED:
+                return
+            _LOGGER.warning(
+                "Charge-start watchdog: frc=2 sent %ds ago but car still in state 3 "
+                "— transaction may have expired; restarting session",
+                CHARGE_START_WATCHDOG_S,
+            )
+            self._transaction_active = False
+            self.hass.async_create_task(self._async_apply_charger_command())
+
+        self._charge_start_watchdog_cancel = async_call_later(
+            self.hass, CHARGE_START_WATCHDOG_S, _on_watchdog_fired
+        )
+
     async def _async_apply_charger_command(self) -> None:
         """Send frc=2 (charge) or frc=1 (pause) based on schedule and overrides."""
         cheap_slot = self._is_current_slot_cheap()
@@ -1163,13 +1202,18 @@ class ChargingCoordinator(DataUpdateCoordinator):
                 _LOGGER.info("Starting new transaction (trx=1 + frc=2, car_state=%s)", self.car_state)
                 await self.charger.async_start_transaction(force_charge=True)
                 self._transaction_active = True
+                self._arm_charge_start_watchdog()
             else:
                 if self.car_state == CAR_CHARGING:
                     _LOGGER.debug("Confirming charge continues: frc=2 (already charging)")
                 else:
                     _LOGGER.debug("Resuming charge: frc=2 (car_state=%s)", self.car_state)
+                    self._arm_charge_start_watchdog()
                 await self.charger.async_set_frc(2)
         else:
+            if self._charge_start_watchdog_cancel:
+                self._charge_start_watchdog_cancel()
+                self._charge_start_watchdog_cancel = None
             if self._transaction_active:
                 _LOGGER.debug("Pausing charge: frc=1 (car_state=%s)", self.car_state)
                 await self.charger.async_set_frc(1)

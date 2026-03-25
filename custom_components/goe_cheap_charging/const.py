@@ -37,6 +37,7 @@ PLATFORMS = ["switch", "time", "number", "sensor", "select"]
 # Timing
 AMP_ADJUST_INTERVAL_S = 30
 PLUGIN_DELAY_S = 60
+CHARGE_START_WATCHDOG_S = 90  # seconds after frc=2 before assuming transaction is stale
 
 # Nordpool: tomorrow's prices appear after this local time
 NORDPOOL_PRICES_AVAILABLE_HOUR = 13
