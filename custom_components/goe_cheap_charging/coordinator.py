@@ -1096,6 +1096,11 @@ class ChargingCoordinator(DataUpdateCoordinator):
             self._charge_start_watchdog_cancel()
             self._charge_start_watchdog_cancel = None
 
+        async def _async_watchdog_recover() -> None:
+            await self.charger.async_stop_transaction()
+            self._transaction_active = False
+            await self._async_apply_charger_command()
+
         @callback
         def _on_watchdog_fired(_now: Any) -> None:
             self._charge_start_watchdog_cancel = None
@@ -1106,8 +1111,7 @@ class ChargingCoordinator(DataUpdateCoordinator):
                 "— transaction may have expired; restarting session",
                 CHARGE_START_WATCHDOG_S,
             )
-            self._transaction_active = False
-            self.hass.async_create_task(self._async_apply_charger_command())
+            self.hass.async_create_task(_async_watchdog_recover())
 
         self._charge_start_watchdog_cancel = async_call_later(
             self.hass, CHARGE_START_WATCHDOG_S, _on_watchdog_fired

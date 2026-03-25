@@ -51,6 +51,13 @@ class GoeCharger:
         await self._async_publish("trx", 1)
         await self._async_publish("frc", 2 if force_charge else 1)
 
+    async def async_stop_transaction(self) -> None:
+        """Stop the current transaction by sending trx=null."""
+        _LOGGER.info("go-e stop transaction (trx=null)")
+        topic = f"go-eCharger/{self.serial}/trx/set"
+        _LOGGER.debug("go-e MQTT → %s : null", topic)
+        await mqtt.async_publish(self.hass, topic, "null")
+
     async def _async_publish(self, key: str, value: int) -> None:
         topic = f"go-eCharger/{self.serial}/{key}/set"
         payload = json.dumps(value)
