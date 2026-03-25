@@ -55,6 +55,40 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# go-e error codes (err key).  Codes 12-16 were renumbered in firmware 60.3;
+# both meanings are shown so the log message is useful regardless of firmware version.
+_GOE_ERR: dict[int, str] = {
+    0: "None",
+    1: "FiAc (AC RCD fault)",
+    2: "FiDc (DC RCD fault)",
+    3: "Phase fault",
+    4: "Overvoltage",
+    5: "Overcurrent",
+    6: "Diode fault",
+    7: "PpInvalid — re-seat cable",
+    8: "GndInvalid (ground fault)",
+    9: "ContactorStuck",
+    10: "ContactorMiss",
+    11: "FiUnknown",
+    12: "StatusLockStuckOpen (fw≥60.3) / Unknown (fw<60.3)",
+    13: "StatusLockStuckLocked (fw≥60.3) / Overtemp (fw<60.3)",
+    14: "FiUnknown (fw≥60.3) / NoComm (fw<60.3)",
+    15: "Unknown (fw≥60.3) / StatusLockStuckOpen (fw<60.3)",
+    16: "Overtemp (fw≥60.3) / StatusLockStuckLocked (fw<60.3)",
+    17: "NoComm",
+    18: "CpInvalid (CP line fault)",
+}
+
+# go-e cable unlock status (cus key)
+_GOE_CUS: dict[int, str] = {
+    0: "Unknown",
+    1: "Unlocked",
+    2: "UnlockFailed",
+    3: "Locked",
+    4: "LockFailed",
+    5: "LockUnlockPowerout",
+}
+
 MIN_BLOCK_SLOTS = 4  # minimum contiguous 15-min slots per charging block (= 1 hour)
 
 
@@ -185,6 +219,7 @@ class ChargingCoordinator(DataUpdateCoordinator):
         self.car_state: int = CAR_IDLE
         self.schedule: list[dict] = []
         self._transaction_active: bool = False
+        self._charger_err: int = 0  # latest err value from charger MQTT
         self._last_sent_amp: int = 0
         self._smart_enabled: bool = False
         self._charge_now: bool = False
@@ -449,6 +484,27 @@ class ChargingCoordinator(DataUpdateCoordinator):
             self._transaction_active = bool(value)
         elif key == "car":
             self._handle_car_state(int(value))
+        elif key == "err":
+            err = int(value) if value is not None else -1
+            if err != self._charger_err:
+                self._charger_err = err
+                if err > 0:
+                    _LOGGER.warning(
+                        "Charger error: %d — %s",
+                        err,
+                        _GOE_ERR.get(err, "Unknown error"),
+                    )
+                elif err == 0:
+                    _LOGGER.info("Charger error cleared")
+                else:
+                    _LOGGER.warning("Charger lost contact with charge controller (err=null)")
+        elif key == "cus":
+            cus = int(value) if value is not None else 0
+            if cus in (2, 4):  # UnlockFailed or LockFailed
+                _LOGGER.warning(
+                    "Cable lock issue: %s — check cable is fully seated",
+                    _GOE_CUS.get(cus, str(cus)),
+                )
 
     def _handle_car_state(self, new_car_state: int) -> None:
         prev = self.car_state
@@ -1101,11 +1157,20 @@ class ChargingCoordinator(DataUpdateCoordinator):
             self._charge_start_watchdog_cancel = None
             if self.car_state != CAR_CONNECTED:
                 return
-            _LOGGER.warning(
-                "Charge-start watchdog: frc=2 sent %ds ago but car still in state 3 "
-                "— transaction may have expired; restarting session",
-                CHARGE_START_WATCHDOG_S,
-            )
+            if self._charger_err > 0:
+                _LOGGER.warning(
+                    "Charge-start watchdog: car still in state 3 after %ds "
+                    "— charger error %d (%s) is likely the cause; retrying anyway",
+                    CHARGE_START_WATCHDOG_S,
+                    self._charger_err,
+                    _GOE_ERR.get(self._charger_err, "Unknown"),
+                )
+            else:
+                _LOGGER.warning(
+                    "Charge-start watchdog: frc=2 sent %ds ago but car still in state 3 "
+                    "— transaction may have expired; restarting session",
+                    CHARGE_START_WATCHDOG_S,
+                )
             self._transaction_active = False
             self.hass.async_create_task(self._async_apply_charger_command())
 
