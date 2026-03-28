@@ -157,8 +157,11 @@ def _select_slots(slots: list, n_slots: int, spread_threshold: float) -> None:
         if multi_selected else float("inf")
     )
 
-    # Prefer single block (fewer start/stops) unless multi-block saves > threshold
-    if single_avg <= multi_avg + spread_threshold:
+    # Prefer single block (fewer start/stops) unless multi-block saves > threshold.
+    # Also fall back to single block if Option B couldn't cover n_needed slots (all
+    # windows overlapped) — otherwise multi_avg is computed on too few cheap slots and
+    # the skewed comparison picks multi-block, leaving the schedule under-sized.
+    if len(multi_selected) < n_needed or single_avg <= multi_avg + spread_threshold:
         selected = set(range(best_start, best_start + n_needed))
     else:
         selected = multi_selected
@@ -539,8 +542,10 @@ class ChargingCoordinator(DataUpdateCoordinator):
                 self._transaction_active = True
 
         elif new_car_state == CAR_COMPLETE and prev != CAR_COMPLETE:
-            _LOGGER.debug("CAR_COMPLETE: clearing _last_sent_car_limit and transaction")
-            self._transaction_active = False
+            # Do NOT clear _transaction_active here. The go-e keeps trx=1 retained until the
+            # cable is physically removed (trx=null MQTT update). Keeping _transaction_active=True
+            # means the next cheap slot just sends frc=2 to resume — no trx=1 needed.
+            _LOGGER.debug("CAR_COMPLETE: clearing _last_sent_car_limit")
             self._last_sent_car_limit = None   # resend limit if car resumes after target SoC increase
             self._stop_amp_adjust()
             _LOGGER.info("Charge complete")
@@ -900,6 +905,7 @@ class ChargingCoordinator(DataUpdateCoordinator):
                     "end": dt_util.parse_datetime(s["end"]),
                     "price": s["price"],
                     "selected": False,
+                    "opportunistic": False,
                 }
                 for s in all_prices
                 if dt_util.parse_datetime(s["end"]) > now
@@ -989,6 +995,27 @@ class ChargingCoordinator(DataUpdateCoordinator):
                 f"{n_selected} slots selected (cheapest of {len(slots)} available)"
             )
 
+        # Add opportunistic cheap slots: consecutive blocks of ≥4 slots (≥1 h) at or below threshold
+        if self._cheap_threshold > 0:
+            i = 0
+            while i < len(slots):
+                if slots[i]["price"] <= self._cheap_threshold:
+                    j = i
+                    while (
+                        j < len(slots)
+                        and slots[j]["price"] <= self._cheap_threshold
+                        and (j == i or slots[j]["start"] == slots[j - 1]["end"])
+                    ):
+                        j += 1
+                    if j - i >= 4:
+                        for k in range(i, j):
+                            if not slots[k]["selected"]:
+                                slots[k]["selected"] = True
+                                slots[k]["opportunistic"] = True
+                    i = j
+                else:
+                    i += 1
+
         self.schedule = slots
 
         self._update_schedule_sensors()
@@ -997,16 +1024,19 @@ class ChargingCoordinator(DataUpdateCoordinator):
 
         selected = [s for s in slots if s["selected"]]
         if selected:
+            n_opportunistic = sum(1 for s in selected if s.get("opportunistic"))
+            n_needed = len(selected) - n_opportunistic
             spot_avg = sum(s["price"] for s in selected) / len(selected)
             transit_cost = self._get_transit_cost()
             avg_price = spot_avg + transit_cost
             est_cost = kwh_needed * avg_price
             next_slot = min(s["start"] for s in selected)
             _LOGGER.info(
-                "Schedule: %.1f kWh, %d slots (%.1fh) selected, avg %.2f SEK/kWh, est %.2f SEK, next: %s, dep: %s (%s)",
+                "Schedule: %.1f kWh, %d slots (%.1fh) selected (%d opportunistic), avg %.2f SEK/kWh, est %.2f SEK, next: %s, dep: %s (%s)",
                 kwh_needed,
                 len(selected),
                 len(selected) * 0.25,
+                n_opportunistic,
                 avg_price,
                 est_cost,
                 dt_util.as_local(next_slot).strftime("%H:%M"),
@@ -1180,23 +1210,6 @@ class ChargingCoordinator(DataUpdateCoordinator):
 
     async def _async_apply_charger_command(self) -> None:
         """Send frc=2 (charge) or frc=1 (pause) based on schedule and overrides."""
-        cheap_slot = self._is_current_slot_cheap()
-        now_price: float | None = None
-        if cheap_slot and not self._in_selected_slot() and not self._charge_now:
-            now_price = next(
-                (
-                    e["price"]
-                    for e in self._current_price_data
-                    if dt_util.parse_datetime(e["start"]) <= dt_util.now() < dt_util.parse_datetime(e["end"])
-                ),
-                None,
-            )
-            if now_price is not None:
-                _LOGGER.info(
-                    "Cheap price threshold triggered: %.2f ≤ %.2f SEK/kWh",
-                    now_price,
-                    self._cheap_threshold,
-                )
         in_slot = self._in_selected_slot()
 
         # No cable connected — nothing to do
@@ -1204,7 +1217,21 @@ class ChargingCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("_async_apply_charger_command: car idle (no cable) — skipping")
             return
 
-        should_charge = self._charge_now or in_slot or cheap_slot
+        should_charge = self._charge_now or in_slot
+
+        # Gap bridge: if we're currently charging and the next selected slot starts
+        # within 15 min, keep charging rather than pausing briefly between slots.
+        if not should_charge and self.car_state == CAR_CHARGING:
+            now = dt_util.now()
+            next_start = min(
+                (s["start"] for s in self.schedule if s["selected"] and s["start"] > now),
+                default=None,
+            )
+            if next_start is not None and (next_start - now).total_seconds() <= 15 * 60:
+                should_charge = True
+                self._schedule_status_reason = (
+                    f"Bridging to slot at {dt_util.as_local(next_start).strftime('%H:%M')}"
+                )
 
         # Update status reason to reflect current charging action
         if self._charge_now:
@@ -1218,46 +1245,49 @@ class ChargingCoordinator(DataUpdateCoordinator):
             if slot:
                 s_start = dt_util.as_local(slot["start"]).strftime("%H:%M")
                 s_end = dt_util.as_local(slot["end"]).strftime("%H:%M")
-                self._schedule_status_reason = f"In selected slot ({s_start}–{s_end})"
+                opp = " (opportunistic)" if slot.get("opportunistic") else ""
+                self._schedule_status_reason = f"In selected slot ({s_start}–{s_end}){opp}"
             else:
                 self._schedule_status_reason = "In selected slot"
-        elif cheap_slot:
-            price_str = f"{now_price:.2f}" if now_price is not None else "?"
-            self._schedule_status_reason = (
-                f"Cheap price ({price_str} SEK/kWh ≤ {self._cheap_threshold:.2f} threshold)"
-            )
-        elif not self.schedule or not any(s["selected"] for s in self.schedule):
-            pass  # reason already set by rebuild (e.g. "Smart charging disabled")
-        else:
-            next_time = self.get_next_slot_time()
-            next_str = dt_util.as_local(next_time).strftime("%H:%M") if next_time else "none"
-            self._schedule_status_reason = f"Paused between slots (next: {next_str})"
+        elif not should_charge:
+            if not self.schedule or not any(s["selected"] for s in self.schedule):
+                pass  # reason already set by rebuild (e.g. "Smart charging disabled")
+            else:
+                next_time = self.get_next_slot_time()
+                next_str = dt_util.as_local(next_time).strftime("%H:%M") if next_time else "none"
+                self._schedule_status_reason = f"Paused between slots (next: {next_str})"
 
         _LOGGER.debug(
             "Apply charger command: car_state=%s transaction_active=%s "
-            "should_charge=%s (charge_now=%s in_slot=%s cheap=%s)",
+            "should_charge=%s (charge_now=%s in_slot=%s)",
             self.car_state,
             self._transaction_active,
             should_charge,
             self._charge_now,
             in_slot,
-            cheap_slot,
         )
 
         if should_charge:
+            current_slot = None
             if self._charge_now:
                 desired_limit = int(self._charge_now_soc_limit)
-            elif in_slot:
-                desired_limit = int(self._last_target_soc)
-            else:  # cheap_slot
-                desired_limit = int(self._opportunistic_soc_limit)
+            else:
+                now = dt_util.now()
+                current_slot = next(
+                    (s for s in self.schedule if s["selected"] and s["start"] <= now < s["end"]),
+                    None,
+                )
+                if current_slot and current_slot.get("opportunistic"):
+                    desired_limit = int(self._opportunistic_soc_limit)
+                else:
+                    desired_limit = int(self._last_target_soc)
 
             if self.car and not self._active_car_is_guest and desired_limit != self._last_sent_car_limit:
                 _LOGGER.info(
                     "Car charge limit: %s → %d%% (mode: %s)",
                     self._last_sent_car_limit,
                     desired_limit,
-                    "charge_now" if self._charge_now else ("in_slot" if in_slot else "cheap"),
+                    "charge_now" if self._charge_now else ("opportunistic" if current_slot and current_slot.get("opportunistic") else "scheduled"),
                 )
                 await self.car.async_set_charge_limit(desired_limit)
                 self._last_sent_car_limit = desired_limit
@@ -1376,8 +1406,6 @@ class ChargingCoordinator(DataUpdateCoordinator):
                 s_start = dt_util.as_local(slot["start"]).strftime("%H:%M")
                 s_end = dt_util.as_local(slot["end"]).strftime("%H:%M")
                 return f"{prefix} | charging ({s_start}–{s_end})"
-        if self._is_current_slot_cheap():
-            return f"{prefix} | cheap price"
         next_slot = self.get_next_slot_time()
         if next_slot:
             return f"{prefix} | paused (next: {dt_util.as_local(next_slot).strftime('%H:%M')})"
@@ -1403,12 +1431,13 @@ class ChargingCoordinator(DataUpdateCoordinator):
             "charger_state": car_state_names.get(self.car_state, str(self.car_state)),
             "in_selected_slot": self._in_selected_slot(),
             "charge_now_active": self._charge_now,
-            "cheap_price_active": self._is_current_slot_cheap(),
+            "opportunistic_slots": sum(1 for s in selected if s.get("opportunistic")),
             "slots": [
                 {
                     "start": s["start"].isoformat(),
                     "end": s["end"].isoformat(),
                     "price": round(s["price"], 4),
+                    "opportunistic": s.get("opportunistic", False),
                 }
                 for s in sorted(selected, key=lambda s: s["start"])
             ],

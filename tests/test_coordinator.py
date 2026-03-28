@@ -216,6 +216,22 @@ class TestSlotSelection:
         assert all(i in selected_indices for i in range(4))
         assert all(i in selected_indices for i in range(8, 12))
 
+    def test_falls_back_to_single_block_when_multi_cannot_cover_needed_slots(self):
+        # 7 slots, n_slots=7 → n_needed=8→min(8,7)=7.
+        # All 4-slot windows overlap heavily; greedy Option B can only find one
+        # non-overlapping window (4 slots).  multi_avg is computed on 4 cheap slots,
+        # making multi look cheaper, but selecting only 4/7 slots would under-charge.
+        # The guard `len(multi_selected) < n_needed` must force fallback to single block.
+        # Prices: [0.05]*4 + [1.00]*3  → single_avg=(4*0.05+3*1.00)/7≈0.457
+        # multi greedy picks [0-3] (avg 0.05); no non-overlapping 2nd window exists
+        # → multi_selected={0,1,2,3} (4 < 7) → must fall back to single block [0-6].
+        prices = [0.05] * 4 + [1.00] * 3
+        slots = _make_slots(prices)
+        _select_slots(slots, 7, 0.10)
+        selected_indices = [i for i, s in enumerate(slots) if s["selected"]]
+        # All 7 slots must be selected (single-block fallback)
+        assert selected_indices == list(range(7))
+
 
 class TestAmpAdjust:
     def _available_amp(

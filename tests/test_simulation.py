@@ -940,25 +940,14 @@ class TestChargerCommandMatrix:
     async def test_cheap_slot_with_threshold_triggers_charge(
         self, fake_hass, mqtt_log
     ):
-        """4+ consecutive cheap slots → frc=2 even with no schedule."""
+        """Opportunistic slot in schedule → frc=2."""
         now = _now_frozen()
         coord = self._make_coord(fake_hass)
         coord.car_state = CAR_CONNECTED
         coord._transaction_active = True
-        coord.schedule = []
-        coord._cheap_threshold = 0.50
-
-        # Build 6 consecutive cheap price entries covering now
-        prices = []
-        for i in range(6):
-            start = now - timedelta(minutes=5) + timedelta(minutes=15 * i)
-            end = start + timedelta(minutes=15)
-            prices.append({
-                "start": start.isoformat(),
-                "end": end.isoformat(),
-                "price": 0.30,
-            })
-        coord._current_price_data = prices
+        # Opportunistic slot covering now (added to schedule during rebuild)
+        opp_slot = {**_slot_covering_now(now), "opportunistic": True}
+        coord.schedule = [opp_slot]
 
         with _c.freeze_now(now):
             await coord._async_apply_charger_command()
@@ -1057,22 +1046,15 @@ class TestChargerCommandMatrix:
 
     @pytest.mark.asyncio
     async def test_opportunistic_sets_opportunistic_limit(self, fake_hass):
-        """Cheap-slot charging sets car charge limit to opportunistic_soc_limit."""
+        """Opportunistic slot in schedule → car charge limit set to opportunistic_soc_limit."""
         now = _now_frozen()
         coord = self._make_coord(fake_hass)
         coord.car_state = CAR_CONNECTED
         coord._transaction_active = True
-        coord._cheap_threshold = 0.50
         coord._opportunistic_soc_limit = 60.0
         coord._last_sent_car_limit = None
-        coord.schedule = []
-
-        prices = []
-        for i in range(6):
-            start = now - timedelta(minutes=5) + timedelta(minutes=15 * i)
-            end = start + timedelta(minutes=15)
-            prices.append({"start": start.isoformat(), "end": end.isoformat(), "price": 0.20})
-        coord._current_price_data = prices
+        opp_slot = {**_slot_covering_now(now), "opportunistic": True}
+        coord.schedule = [opp_slot]
 
         with _c.freeze_now(now):
             await coord._async_apply_charger_command()
@@ -1206,7 +1188,8 @@ class TestCarStateMachine:
 
     @pytest.mark.asyncio
     async def test_charge_complete_clears_transaction(self, fake_hass):
-        """Charge complete (→4) → transaction cleared, last_sent_car_limit reset."""
+        """Charge complete (→4) → transaction stays active (go-e retains trx until unplug),
+        but last_sent_car_limit is reset so the limit is resent if charging resumes."""
         coord = _c.make_coordinator(fake_hass)
         coord.car_state = CAR_CHARGING
         coord._transaction_active = True
@@ -1215,7 +1198,7 @@ class TestCarStateMachine:
         coord._handle_car_state(CAR_COMPLETE)
         await fake_hass.drain_tasks()
 
-        assert coord._transaction_active is False
+        assert coord._transaction_active is True  # retained until cable removed (trx=null MQTT)
         assert coord._last_sent_car_limit is None
 
     @pytest.mark.asyncio
@@ -2588,15 +2571,15 @@ class TestCarStateTransitionEdgeCases:
         coord._handle_car_state(CAR_COMPLETE)
         await fake_hass.drain_tasks()
 
-        assert coord._transaction_active is False
+        # Transaction stays active (go-e retains trx until cable removed)
+        assert coord._transaction_active is True
         assert coord._last_sent_car_limit is None
 
-        # Second duplicate CAR_COMPLETE
+        # Second duplicate CAR_COMPLETE — _handle_car_state short-circuits (same state)
         coord._handle_car_state(CAR_COMPLETE)
         await fake_hass.drain_tasks()
 
-        # State still clean
-        assert coord._transaction_active is False
+        assert coord._transaction_active is True
 
     @pytest.mark.asyncio
     async def test_force_update_called_on_charging_start(self, fake_hass):
@@ -3384,7 +3367,7 @@ class TestScheduleSensorHelpers:
         attrs = coord.get_schedule_debug_attrs()
         for k in ("status_reason", "kwh_needed", "current_soc", "target_soc",
                    "departure", "charger_state", "in_selected_slot",
-                   "charge_now_active", "cheap_price_active", "slots"):
+                   "charge_now_active", "opportunistic_slots", "slots"):
             assert k in attrs, f"Missing key: {k}"
 
     def test_get_schedule_debug_attrs_car_state_names(self, fake_hass):
