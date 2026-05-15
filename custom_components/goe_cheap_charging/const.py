@@ -32,7 +32,7 @@ WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", 
 ACTIVE_CAR_GUEST = "guest"
 
 # Platforms
-PLATFORMS = ["switch", "time", "number", "sensor", "select"]
+PLATFORMS = ["switch", "time", "number", "sensor", "select", "binary_sensor"]
 
 # Timing
 AMP_ADJUST_INTERVAL_S = 30
