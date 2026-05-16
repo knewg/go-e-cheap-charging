@@ -32,7 +32,7 @@ class ChargerConnectionNeededSensor(BinarySensorEntity):
 
     _attr_should_poll = False
     _attr_has_entity_name = True
-    _attr_device_class = BinarySensorDeviceClass.PLUG
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
     _attr_icon = "mdi:ev-plug-type2"
 
     def __init__(self, coordinator: ChargingCoordinator, entry: ConfigEntry) -> None:
