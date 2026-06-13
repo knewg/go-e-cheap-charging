@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+from homeassistant.core import CoreState, Event, HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -38,6 +39,7 @@ class ActiveCarSelect(RestoreEntity, SelectEntity):
         self._option_map: dict[str, tuple[str, str]] = {}  # label → (soc_entity_id, device_id)
         self._current_option: str = "Guest"
         self._attr_options: list[str] = ["Guest"]
+        self._pending_restore: str | None = None
 
     def _build_option_map(self) -> dict[str, tuple[str, str]]:
         """Discover all Kia UVO cars and return label→(soc_entity_id, device_id) map."""
@@ -66,15 +68,48 @@ class ActiveCarSelect(RestoreEntity, SelectEntity):
         self._attr_options = list(self._option_map.keys())
 
         last = await self.async_get_last_state()
-        if last and last.state in self._option_map:
-            self._current_option = last.state
+        restored_label = last.state if last else None
+
+        if restored_label and restored_label in self._option_map:
+            # Happy path: label is known (including explicit "Guest").
+            self._current_option = restored_label
+        elif restored_label and restored_label != "Guest":
+            # Car label exists in history but its entity isn't registered yet.
+            # This is a startup race with kia_uvo: our integration loaded before
+            # the car integration, so _build_option_map() found nothing.
+            # Apply Guest temporarily and retry once HA finishes starting.
+            self._current_option = "Guest"
+            self._pending_restore = restored_label
+            if self.hass.state != CoreState.running:
+                self.hass.bus.async_listen_once(
+                    EVENT_HOMEASSISTANT_STARTED, self._async_retry_restore
+                )
+            else:
+                await self._async_retry_restore(None)
         else:
-            # Default to the first discovered car, or Guest if none found.
+            # No history, or history was Guest: use first discovered car or Guest.
             non_guest = [label for label in self._option_map if label != "Guest"]
             self._current_option = non_guest[0] if non_guest else "Guest"
 
         soc_entity_id, device_id = self._option_map[self._current_option]
         self._coordinator.async_set_active_car(soc_entity_id, device_id)
+
+    async def _async_retry_restore(self, _event: Event | None) -> None:
+        """Retry car selection after HA fully starts (resolves kia_uvo startup race)."""
+        self._option_map = self._build_option_map()
+        self._attr_options = list(self._option_map.keys())
+
+        if self._pending_restore and self._pending_restore in self._option_map:
+            self._current_option = self._pending_restore
+        else:
+            non_guest = [label for label in self._option_map if label != "Guest"]
+            self._current_option = non_guest[0] if non_guest else "Guest"
+
+        self._pending_restore = None
+        soc_entity_id, device_id = self._option_map[self._current_option]
+        self._coordinator.async_set_active_car(soc_entity_id, device_id)
+        self.async_write_ha_state()
+        await self._coordinator._async_rebuild_schedule()
 
     @property
     def current_option(self) -> str:
