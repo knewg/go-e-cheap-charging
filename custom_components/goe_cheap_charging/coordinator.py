@@ -259,6 +259,7 @@ class ChargingCoordinator(DataUpdateCoordinator):
         # References to sensor entities for pushing state updates
         self._schedule_sensor: Any = None
         self._next_slot_sensor: Any = None
+        self._connection_needed_sensor: Any = None
 
     # ------------------------------------------------------------------
     # Setup / teardown
@@ -581,6 +582,9 @@ class ChargingCoordinator(DataUpdateCoordinator):
             self._stop_hourly_force_update()
             if not self._active_car_is_guest and self.car is not None:
                 self.hass.async_create_task(self.car.async_force_update())
+
+        if self._connection_needed_sensor:
+            self._connection_needed_sensor.async_write_ha_state()
 
     # ------------------------------------------------------------------
     # Plug-in / charge complete
@@ -1383,6 +1387,8 @@ class ChargingCoordinator(DataUpdateCoordinator):
             self._schedule_sensor.async_write_ha_state()
         if self._next_slot_sensor:
             self._next_slot_sensor.async_write_ha_state()
+        if self._connection_needed_sensor:
+            self._connection_needed_sensor.async_write_ha_state()
 
     def get_schedule_summary(self) -> str:
         selected = [s for s in self.schedule if s["selected"]]

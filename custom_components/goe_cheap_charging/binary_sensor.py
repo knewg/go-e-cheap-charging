@@ -24,7 +24,9 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: ChargingCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([ChargerConnectionNeededSensor(coordinator, entry)])
+    sensor = ChargerConnectionNeededSensor(coordinator, entry)
+    coordinator._connection_needed_sensor = sensor
+    async_add_entities([sensor])
 
 
 class ChargerConnectionNeededSensor(BinarySensorEntity):
